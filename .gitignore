@@ -1,0 +1,29 @@
+examples
+bugs
+build
+*.png
+*.ipynb
+*.bw
+*.gz
+*.so
+
+# Rust
+target
+Cargo.lock
+
+# Python
+__pycache__/
+*.egg-info/
+*.egg
+
+# Sphinx documentation
+_build
+_autosummary
+
+# Test suite artifacts
+.hypothesis
+.coverage
+
+# h5ad
+*.h5ad
+*.h5ads
