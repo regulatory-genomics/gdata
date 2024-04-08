@@ -57,10 +57,12 @@ class SequenceData(IterableDataset):
         self.ignore_enesmbl_suffix = ignore_ensembl_suffix
         self.range = None
         self.annotations = None
+        self.length = None
         self.gene_ids = []
         if coordinates is not None:
             self.coordinates = coordinates
         elif gene_ids is not None:
+            self.length = upstream + downstream
             coordinates = []
             for id in gene_ids:
                 loc = self._find_location(id)
@@ -88,7 +90,7 @@ class SequenceData(IterableDataset):
         i = next(self.range)
         chr, start, end, strand = self.coordinates[i]
         seq = self.genome.get_seq(chr, start, end, rc=not strand)
-        seq = encode_dna(seq)
+        seq = encode_dna(seq, self.length)
         if self.data_only:
             return seq
         else:
