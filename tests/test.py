@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 
 if __name__ == '__main__':
     genome = genomepy.Genome('GRCh38')
+    print(genome)
 
     field = 'gene_type'
     annotation = genomepy.Annotation(genome.genome_dir)

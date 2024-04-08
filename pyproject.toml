@@ -16,8 +16,6 @@ dependencies = [
     'torchdata >= 0.7.1',
     'pyfaidx >= 0.8.1, < 0.9.0',
     'genomepy >= 0.16.1, < 0.17.0',
-    'polars',
-    'pyarrow',
 ]
 
 [tool.maturin]

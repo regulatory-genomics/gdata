@@ -1,32 +1,42 @@
 from __future__ import annotations
 import torch
-import torchdata
 from torch.utils.data import IterableDataset
 import genomepy
 
 class SequenceData(IterableDataset):
     """
-    An `IterableDataset` object that yields consecutive genomic sequences.
+    An `IterableDataset` object that yields genomics sequences given a list of
+    coordinates or gene ids.
 
-    This dataset reads DNA sequences from a FASTA file and returns them as sub-sequences of fixed length.
+    This class returns a DNA sequence as a tensor of integers (A=0, C=1, G=2, T=3, N=4)
+    or a tuple of ((name, start, end), sequence) if `data_only` is False.
+    Note that the sequence is reverse complemented if the strand is negative. 
+    When `gene_ids` is provided, the coordinates are extracted from the genome annotation.
+    Not all gene ids may be found in the annotation file, in which case the sequence is skipped.
+    The `.gene_ids` attribute contains the list of gene ids that were found.
 
     Parameters
     ----------
     genome
         Genome object from the `genomepy` package.
     coordinates 
-        Coordinates are 1-based.
+        A list of tuples with the chromosome name, start and end coordinates,
+        and strand (True if foward). Coordinates are 1-based.
     gene_ids
-        A list of gene ids to extract sequences from. The strand of the gene is
-        used to determine the orientation of the sequence.
+        A list of gene ids to extract sequences from. 
     upstream
         Number of nucleotides to include upstream of the gene.
     downstream
         Number of nucleotides to include downstream of the gene.
-    use_raw_seq
-        If True, return the raw DNA sequence instead of encoding it
     data_only
         If True, return only the DNA sequences, otherwise return a tuple of ((name, start, end), sequence)
+    ignore_ensembl_suffix
+        If True, ignore the suffix in ENSEMBL gene ids.
+    
+    Returns
+    -------
+    A DNA sequence as a tensor of integers (A=0, C=1, G=2, T=3, N=4) or a tuple of
+    ((name, start, end), sequence) if `data_only` is False. 
     """
     def __init__(
         self,
@@ -36,21 +46,28 @@ class SequenceData(IterableDataset):
         gene_ids: list[str] | None = None,
         upstream: int = 2000,
         downstream: int = 2000,
-        use_raw_seq: bool = False,
         data_only: bool = True,
+        ignore_ensembl_suffix: bool = True,
     ):
         super().__init__()
         self.genome = genome
         self.upstream = upstream
         self.downstream = downstream
-        self.use_raw_seq = use_raw_seq
         self.data_only = data_only
+        self.ignore_enesmbl_suffix = ignore_ensembl_suffix
         self.range = None
         self.annotations = None
+        self.gene_ids = []
         if coordinates is not None:
             self.coordinates = coordinates
         elif gene_ids is not None:
-            self.coordinates = [self._find_location(x) for x in gene_ids]
+            coordinates = []
+            for id in gene_ids:
+                loc = self._find_location(id)
+                if loc is not None:
+                    coordinates.append(loc)
+                    self.gene_ids.append(id)
+            self.coordinates = coordinates
         else:
             raise ValueError('Either coordinates or gene_ids must be provided')
 
@@ -69,34 +86,39 @@ class SequenceData(IterableDataset):
 
     def __next__(self):
         i = next(self.range)
-        chr, start, end, rc = self.coordinates[i]
-        seq = self.genome.get_seq(chr, start, end, rc)
-        if not self.use_raw_seq:
-            seq = encode_dna(seq)
+        chr, start, end, strand = self.coordinates[i]
+        seq = self.genome.get_seq(chr, start, end, rc=not strand)
+        seq = encode_dna(seq)
         if self.data_only:
             return seq
         else:
             return ((chr, start, end), seq)
 
     def _find_location(self, name: str):
+        if self.ignore_enesmbl_suffix:
+            name = name.split('.')[0] if name.startswith('ENS') else name
+
         if self.annotations is None:
-            self.annotations = _read_annotation(self.genome, 'gene_id')
+            gtf = _read_annotation(self.genome, 'gene_id')
+            if self.ignore_enesmbl_suffix:
+                gtf.index = [x.split('.')[0] if x.startswith('ENS') else x for x in gtf.index]
+            self.annotations = gtf
 
         if name in self.annotations.index:
             rec = self.annotations.loc[name]
             chr = rec['seqname']
-            rc = True if rec['end'] == '-' else False
+            strand = True if rec['end'] == '+' else False
             start = rec['start']
             end = rec['end']
-            if rc:
+            if strand:
                 start = start - self.downstream
                 end = end + self.upstream
             else:
                 start = start - self.upstream
                 end = end + self.downstream
-            return (chr, start, end, rc)
+            return (chr, start, end, strand)
         else:
-            raise ValueError(f'Gene {name} not found in genome annotation')
+            return None
 
 def _read_annotation(genome, key: str, feature: str ='gene'):
     annotation = genomepy.Annotation(genome.genome_dir)
