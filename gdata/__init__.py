@@ -21,7 +21,7 @@ class SequenceData(IterableDataset):
         Genome object from the `genomepy` package.
     coordinates 
         A list of tuples with the chromosome name, start and end coordinates,
-        and strand (True if foward). Coordinates are 1-based.
+        and strand (True if foward). Coordinates are 0-based, and half-open.
     gene_ids
         A list of gene ids to extract sequences from. 
     upstream
@@ -32,6 +32,8 @@ class SequenceData(IterableDataset):
         If True, return only the DNA sequences, otherwise return a tuple of ((name, start, end), sequence)
     ignore_ensembl_suffix
         If True, ignore the suffix in ENSEMBL gene ids.
+    gene_type
+        Filter genes by gene type (e.g., protein_coding).
     
     Returns
     -------
@@ -47,7 +49,8 @@ class SequenceData(IterableDataset):
         upstream: int = 2000,
         downstream: int = 2000,
         data_only: bool = True,
-        ignore_ensembl_suffix: bool = True,
+        ignore_ensembl_suffix: bool = False,
+        gene_type: str | None = None,
     ):
         super().__init__()
         self.genome = genome
@@ -55,6 +58,7 @@ class SequenceData(IterableDataset):
         self.downstream = downstream
         self.data_only = data_only
         self.ignore_enesmbl_suffix = ignore_ensembl_suffix
+        self.gene_type = gene_type
         self.range = None
         self.annotations = None
         self.length = None
@@ -89,7 +93,7 @@ class SequenceData(IterableDataset):
     def __next__(self):
         i = next(self.range)
         chr, start, end, strand = self.coordinates[i]
-        seq = self.genome.get_seq(chr, start, end, rc=not strand)
+        seq = self.genome.get_seq(chr, start + 1, end, rc=not strand)
         seq = encode_dna(seq, self.length)
         if self.data_only:
             return seq
@@ -101,7 +105,7 @@ class SequenceData(IterableDataset):
             name = name.split('.')[0] if name.startswith('ENS') else name
 
         if self.annotations is None:
-            gtf = _read_annotation(self.genome, 'gene_id')
+            gtf = _read_annotation(self.genome, 'gene_id', gene_type=self.gene_type)
             if self.ignore_enesmbl_suffix:
                 gtf.index = [x.split('.')[0] if x.startswith('ENS') else x for x in gtf.index]
             self.annotations = gtf
@@ -109,27 +113,38 @@ class SequenceData(IterableDataset):
         if name in self.annotations.index:
             rec = self.annotations.loc[name]
             chr = rec['seqname']
-            strand = True if rec['end'] == '+' else False
-            start = rec['start']
-            end = rec['end']
-            if strand:
-                start = start - self.downstream
-                end = end + self.upstream
+            strand = rec['strand']
+            if strand == '+':
+                strand = True
+            elif strand == '-':
+                strand = False
             else:
-                start = start - self.upstream
-                end = end + self.downstream
+                raise ValueError(f'Unknown strand {strand}')
+            start = rec['start'] - 1
+            end = rec['end'] - 1
+            if strand:
+                start = max(start - self.upstream, 0)
+                end = start + self.downstream
+            else:
+                start = max(end - self.downstream + 1, 0)
+                end = end + self.upstream + 1
             return (chr, start, end, strand)
         else:
             return None
 
-def _read_annotation(genome, key: str, feature: str ='gene'):
+def _read_annotation(genome, key: str, feature: str ='gene', gene_type: str | None = None):
     annotation = genomepy.Annotation(genome.genome_dir)
     gtf = annotation.gtf
     gtf = gtf[gtf['feature'] == feature]
     gtf.index = annotation.from_attributes(key, annot=gtf)
+
+    if gene_type is not None:
+        gene_type = annotation.from_attributes('gene_type', annot=gtf)
+        gtf = gtf[gene_type == gene_type]
+
     return gtf
 
-def encode_dna(dna, length: int | None = None) -> torch.LongTensor:
+def encode_dna(dna, length: int | None = None, padding: str = 'right') -> torch.LongTensor:
     """
     Convert DNA strings to integers.
     """
