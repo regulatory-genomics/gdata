@@ -16,7 +16,8 @@ class BigWigData(IterableDataset):
     Parameters
     ----------
     filepath_or_url
-        Path to the bigwig file or URL.
+        Path/URL to the bigwig file or a list of paths/URLs to multiple bigwig files.
+        If multiple files are provided, the values from each file are averaged.
     coordinates 
         A list of tuples with the chromosome name, start and end coordinates,
         and strand (True if foward). Coordinates are 0-based, and half-open.
@@ -31,33 +32,38 @@ class BigWigData(IterableDataset):
  
     def __init__(
         self,
-        filepath_or_url: str,
+        filepath_or_url: str | list[str],
         coordinates: list[tuple[str, int, int, bool]], 
         min_length: int | None = None,
     ):
-        self.file = filepath_or_url
-        self.bigwig = None
+        self.files = [filepath_or_url] if isinstance(filepath_or_url, str) else filepath_or_url
+        self.bigwigs = None
         self.coordinates = coordinates
         self.min_length = min_length
 
     def __iter__(self):
         import pybigtools
-        if self.bigwig is not None:
-            self.bigwig.close()
-        self.bigwig = pybigtools.open(self.file)
+        if self.bigwigs is None:
+            self.bigwigs = [pybigtools.open(file) for file in self.files]
         self.coordinates_iter = iter(self.coordinates)
         return self
 
     def __next__(self):
         chrom, start, end, strand = next(self.coordinates_iter)
-        values = self.bigwig.values(chrom, start, end)
+        values = None
+        for bw in self.bigwigs:
+            if values is None:
+                values = bw.values(chrom, start, end)
+            else:
+                values += bw.values(chrom, start, end)
+        values /= len(self.bigwigs)
         if not strand:
             values = values[::-1]
         if self.min_length is not None:
             padding_width = self.min_length - len(values)
             if padding_width > 0:
                 values = np.pad(values, (0, padding_width), mode='constant', constant_values=(0.0, 0.0))
-        return torch.tensor(values)
+        return torch.tensor(values, dtype=torch.float32)
 
 class SequenceData(IterableDataset):
     """
