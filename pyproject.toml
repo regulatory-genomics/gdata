@@ -14,8 +14,10 @@ dynamic = ["version"]
 dependencies = [
     'torch >= 2.1.0, < 2.3.0',
     'torchdata >= 0.7.1',
+    'numpy',
     'pyfaidx >= 0.8.1, < 0.9.0',
     'genomepy >= 0.16.1, < 0.17.0',
+    'pybigtools',
 ]
 
 [tool.maturin]

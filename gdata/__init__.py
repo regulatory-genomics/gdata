@@ -2,8 +2,62 @@ from __future__ import annotations
 import torch
 from torch.utils.data import IterableDataset
 import genomepy
-import pickle, gzip
 from pathlib import Path
+import numpy as np
+import gzip
+import pickle
+import os
+
+class BigWigData(IterableDataset):
+    """
+    An `IterableDataset` object that yields values from a bigwig file given a list of
+    coordinates.
+
+    Parameters
+    ----------
+    filepath_or_url
+        Path to the bigwig file or URL.
+    coordinates 
+        A list of tuples with the chromosome name, start and end coordinates,
+        and strand (True if foward). Coordinates are 0-based, and half-open.
+    min_length
+        The returned sequence will be pad with 0.0 if its length is shorter
+        than `min_length`.
+    
+    Returns
+    -------
+    A tensor of values from the bigwig file.
+    """
+ 
+    def __init__(
+        self,
+        filepath_or_url: str,
+        coordinates: list[tuple[str, int, int, bool]], 
+        min_length: int | None = None,
+    ):
+        self.file = filepath_or_url
+        self.bigwig = None
+        self.coordinates = coordinates
+        self.min_length = min_length
+
+    def __iter__(self):
+        import pybigtools
+        if self.bigwig is not None:
+            self.bigwig.close()
+        self.bigwig = pybigtools.open(self.file)
+        self.coordinates_iter = iter(self.coordinates)
+        return self
+
+    def __next__(self):
+        chrom, start, end, strand = next(self.coordinates_iter)
+        values = self.bigwig.values(chrom, start, end)
+        if not strand:
+            values = values[::-1]
+        if self.min_length is not None:
+            padding_width = self.min_length - len(values)
+            if padding_width > 0:
+                values = np.pad(values, (0, padding_width), mode='constant', constant_values=(0.0, 0.0))
+        return torch.tensor(values)
 
 class SequenceData(IterableDataset):
     """
@@ -207,13 +261,17 @@ class _FromPickle(IterableDataset):
             return self.__next__()
 
 def _save_data(data, filename, chunk_size: int = 200):
-    with gzip.open(filename, 'wb') as file:
-        chunk = []
-        for item in data: 
-            chunk.append(item)
-            if len(chunk) >= chunk_size:
+    try:
+        with gzip.open(filename, 'wb') as file:
+            chunk = []
+            for item in data: 
+                chunk.append(item)
+                if len(chunk) >= chunk_size:
+                    pickle.dump(chunk, file)
+                    chunk = []
+            if len(chunk) > 0:
                 pickle.dump(chunk, file)
-                chunk = []
-        if len(chunk) > 0:
-            pickle.dump(chunk, file)
-
+    except Exception as e:
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise e
