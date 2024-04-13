@@ -8,6 +8,7 @@ import gzip
 import pickle
 import os
 
+
 class BigWigData(IterableDataset):
     """
     An `IterableDataset` object that yields values from a bigwig file given a list of
@@ -29,7 +30,6 @@ class BigWigData(IterableDataset):
     -------
     A tensor of values from the bigwig file.
     """
- 
     def __init__(
         self,
         filepath_or_url: str | list[str],
@@ -63,7 +63,7 @@ class BigWigData(IterableDataset):
             padding_width = self.min_length - len(values)
             if padding_width > 0:
                 values = np.pad(values, (0, padding_width), mode='constant', constant_values=(0.0, 0.0))
-        return torch.tensor(values, dtype=torch.float32)
+        return torch.tensor(np.nan_to_num(values, copy=True, nan=0.0), dtype=torch.float32)
 
 class SequenceData(IterableDataset):
     """
@@ -191,6 +191,51 @@ def _mask_nucleotides(
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels
+
+class HiCData(IterableDataset):
+    """
+    """
+    def __init__(
+        self,
+        filepath: str | list[str],
+        coordinates1: list[tuple[str, int, int]], 
+        coordinates2: list[tuple[str, int, int]] | None = None, 
+        resolution: int = 5000,
+    ):
+        if coordinates2 is not None:
+            assert len(coordinates1) == len(coordinates2)
+        self.files = [filepath] if isinstance(filepath, str) else filepath
+        self.coordinates1 = coordinates1
+        self.coordinates2 = coordinates2
+        self.resolution = resolution
+        self.hic = None
+
+    def __iter__(self):
+        import hicstraw
+        if self.hic is None:
+            self.hic = [hicstraw.HiCFile(file) for file in self.files]
+        self.coordinates_iter = enumerate(self.coordinates1)
+        return self
+
+    def __next__(self):
+        i, (chr1, start1, end1) = next(self.coordinates_iter)
+        if self.coordinates2 is None:
+            chr2 = chr1
+            start2 = start1
+            end2 = end1
+        else:
+            chr2, start2, end2 = self.coordinates2[i]
+
+        values = None
+        for hic in self.hic:
+            mzd = hic.getMatrixZoomData(chr1, chr2, "oe", "VC", "BP", self.resolution)
+            mat = mzd.getRecordsAsMatrix(start1, end1, start2, end2)
+            if values is None:
+                values = mat
+            else:
+                values += mat
+        values /= len(self.hic)
+        return torch.tensor(values, dtype=torch.float32)
 
 class PickleData(IterableDataset):
     """
