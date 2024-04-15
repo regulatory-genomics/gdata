@@ -7,7 +7,7 @@ import numpy as np
 import gzip
 import pickle
 import os
-
+from collections import Counter
 
 class BigWigData(IterableDataset):
     """
@@ -194,20 +194,26 @@ def _mask_nucleotides(
 
 class HiCData(IterableDataset):
     """
+    An `IterableDataset` object that yields contact matrices of HiC data.
+
+    Parameters
+    ----------
     """
     def __init__(
         self,
-        filepath: str | list[str],
+        filepath_or_url: str | list[str],
         coordinates1: list[tuple[str, int, int]], 
         coordinates2: list[tuple[str, int, int]] | None = None, 
         resolution: int = 5000,
+        format: Literal['matrix', 'record'] = 'record',
     ):
         if coordinates2 is not None:
             assert len(coordinates1) == len(coordinates2)
-        self.files = [filepath] if isinstance(filepath, str) else filepath
+        self.files = [filepath_or_url] if isinstance(filepath_or_url, str) else filepath_or_url
         self.coordinates1 = coordinates1
         self.coordinates2 = coordinates2
         self.resolution = resolution
+        self.format = format
         self.hic = None
 
     def __iter__(self):
@@ -227,15 +233,34 @@ class HiCData(IterableDataset):
             chr2, start2, end2 = self.coordinates2[i]
 
         values = None
-        for hic in self.hic:
-            mzd = hic.getMatrixZoomData(chr1, chr2, "oe", "VC", "BP", self.resolution)
-            mat = mzd.getRecordsAsMatrix(start1, end1, start2, end2)
-            if values is None:
-                values = mat
-            else:
-                values += mat
-        values /= len(self.hic)
-        return torch.tensor(values, dtype=torch.float32)
+        n = len(self.hic)
+        if self.format == 'record':
+            for hic in self.hic:
+                mzd = hic.getMatrixZoomData(chr1, chr2, "observed", "VC", "BP", self.resolution)
+                tmp = Counter({(rec.binX, rec.binY): rec.counts for rec in mzd.getRecords(start1, end1, start2, end2)})
+                if values is None:
+                    values = tmp
+                else:
+                    values += tmp
+            if n > 1:
+                for key in values:
+                    values[key] /= n
+            values = sorted(list(values.items()))
+            values = [((chr1, i, i + self.resolution), (chr2, j, j + self.resolution), v) for (i, j), v in values]
+        elif self.format == 'matrix':
+            for hic in self.hic:
+                mzd = hic.getMatrixZoomData(chr1, chr2, "observed", "VC", "BP", self.resolution)
+                tmp = mzd.getRecordsAsMatrix(start1, end1, start2, end2)
+                if values is None:
+                    values = tmp
+                else:
+                    values += tmp
+            if n > 1:
+                values /= n
+                values = torch.Tensor(values, dtype=torch.float32)
+        else:
+            raise ValueError(f'unknown format')
+        return values
 
 class PickleData(IterableDataset):
     """

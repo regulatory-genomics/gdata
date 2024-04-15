@@ -54,8 +54,8 @@ def get_promoters(
             start = rec['start'] - 1
             end = rec['end'] - 1
             if strand:
-                start = max(start - upstream, 0)
                 end = start + downstream
+                start = max(start - upstream, 0)
             else:
                 start = max(end - downstream + 1, 0)
                 end = end + upstream + 1
