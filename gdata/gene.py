@@ -51,14 +51,16 @@ def get_promoters(
                 strand = False
             else:
                 raise ValueError(f'Unknown strand {strand}')
-            start = rec['start'] - 1
+            start = rec['start'] - 1  # Convert 1-based coordinate to 0-based coordinate
             end = rec['end'] - 1
             if strand:
-                end = start + downstream
-                start = max(start - upstream, 0)
+                tss = start
+                start = max(tss - upstream, 0)
+                end = tss + downstream
             else:
-                start = max(end - downstream + 1, 0)
-                end = end + upstream + 1
+                tss = end
+                start = max(tss - downstream + 1, 0)
+                end = tss + upstream + 1
             loc = (chr, start, end, strand)
         else:
             loc = None
