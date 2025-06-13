@@ -9,6 +9,18 @@ import pickle
 import os
 from collections import Counter
 
+from . import utils
+
+import sys
+import logging
+
+logging.basicConfig(
+    stream=sys.stderr,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO, 
+)
+
 class BigWigData(IterableDataset):
     """
     An `IterableDataset` object that yields values from a bigwig file given a list of

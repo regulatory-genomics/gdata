@@ -2,9 +2,14 @@
 requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "gdata._gdata"
+
 [project]
 name = "gdata"
-requires-python = ">=3.9, <3.12"
+requires-python = ">=3.9, <3.14"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -12,8 +17,6 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    'torch >= 2.1.0, < 2.3.0',
-    'torchdata >= 0.7.1',
     'numpy',
     'pandas',
     'pyfaidx >= 0.8.1, < 0.9.0',
@@ -21,5 +24,8 @@ dependencies = [
     'pybigtools',
 ]
 
-[tool.maturin]
-features = ["pyo3/extension-module"]
+[project.optional-dependencies]
+torch = [
+    'torch >= 2.5.0, < 2.8.0',
+    'torchdata >= 0.11',
+]
