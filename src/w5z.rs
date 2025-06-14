@@ -43,6 +43,20 @@ impl W5Z {
         Ok(PyArray1::from_owned_array(py, arr))
     }
 
+    fn verify(&self, py: Python) -> Result<()> {
+        let chromosomes: Vec<_> = self.keys()?;
+        let mut s = 0.0f64;
+        for chrom in chromosomes {
+            let data = self.__getitem__(py, &chrom)?;
+            for x in data.try_iter()? {
+                s += x?.extract::<f64>()?;
+            }
+        }
+        let real_s = self.inner.attr("sum")?.read_scalar::<f64>()?;
+        println!("Sum of all values: {}; Delta with ground truth: {}", s, (s - real_s).abs());
+        Ok(())
+    }
+
     fn close(&self) -> Result<()> {
         self.inner.clone().close()?;
         Ok(())

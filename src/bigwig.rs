@@ -71,7 +71,7 @@ impl Stats {
         attr.write_scalar(&self.mean())?;
         let attr = group.new_attr::<f64>().create("min")?;
         attr.write_scalar(&self.min())?;
-        let attr= group.new_attr::<f64>().create("max")?;
+        let attr = group.new_attr::<f64>().create("max")?;
         attr.write_scalar(&self.max())?;
         let attr = group.new_attr::<f64>().create("stddev")?;
         attr.write_scalar(&self.stddev())?;
@@ -84,10 +84,16 @@ impl Stats {
 /// Formats the sum of two numbers as string.
 #[pyfunction]
 #[pyo3(
-    signature = (input, output, *, compression_level=9, precision=0.0001, verify=false),
-    text_signature = "(input, output, *, compression_level=9, precision=0.0001, verify=False)",
+    signature = (input, output, *, compression_level=9, precision=0.0, verify=false),
+    text_signature = "(input, output, *, compression_level=9, precision=0.0, verify=False)",
 )]
-pub fn bw_to_w5z(input: &str, output: PathBuf, compression_level: u8, precision: f64, verify: bool) -> Result<()> {
+pub fn bw_to_w5z(
+    input: &str,
+    output: PathBuf,
+    compression_level: u8,
+    precision: f64,
+    verify: bool,
+) -> Result<()> {
     hdf5::filters::blosc_set_nthreads(128);
     let h5 = File::create(output)?;
 
@@ -227,33 +233,15 @@ fn write_data(h5: &Group, name: &str, data: Vec<u8>, compression_level: u8) -> R
 /// Encode the data using ZFP compression with a specified precision.
 fn encode_zfp(data: &[f32], precision: f64) -> Result<Vec<u8>> {
     let arr = ArrayView1::from(data);
-    let encoded_data = numcodecs_zfp::compress(
-        arr,
-        &numcodecs_zfp::ZfpCompressionMode::FixedAccuracy {
+    let mode = if precision == 0.0 {
+        numcodecs_zfp::ZfpCompressionMode::Reversible
+    } else {
+        numcodecs_zfp::ZfpCompressionMode::FixedAccuracy {
             tolerance: precision,
-        },
-    )?;
-    Ok(encoded_data)
-}
-
-#[pyfunction]
-pub fn verify_w5z(file: PathBuf) -> Result<()> {
-    let h5 = File::open(file)?;
-    let mut stats = Stats::new();
-    let chromosomes: Vec<_> = h5
-        .group("/")?
-        .datasets()?
-        .into_iter()
-        .map(|d| d.name().to_string())
-        .collect();
-    for chrom in chromosomes {
-        let data = read_data(&h5.group("/")?, &chrom)?;
-        for &x in data.iter() {
-            stats.add(x);
         }
-    }
-    assert!((h5.attr("sum")?.read_scalar::<f64>()? - stats.sum()).abs() / stats.sum() < 0.001);
-    Ok(())
+    };
+    let encoded_data = numcodecs_zfp::compress(arr, &mode)?;
+    Ok(encoded_data)
 }
 
 fn is_url(src: &str) -> bool {

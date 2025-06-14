@@ -12,7 +12,6 @@ fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<w5z::W5Z>()?;
 
     m.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, m)?)?;
-    m.add_function(wrap_pyfunction!(bigwig::verify_w5z, m)?)?;
 
     m.add_function(wrap_pyfunction!(bam::bam_cov, m)?)?;
     Ok(())

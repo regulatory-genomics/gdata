@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from gdata._gdata import W5Z, bam_cov, bw_to_w5z, verify_w5z
+from gdata._gdata import W5Z, bam_cov, bw_to_w5z
 
-__all__ = ['bam_cov', 'balanced_sampling', 'bw_to_w5z', 'verify_w5z', 'W5Z']
+__all__ = ['bam_cov', 'balanced_sampling', 'bw_to_w5z', 'W5Z']
 
 def balanced_sampling(data, num_bins, samples_per_bin, return_indices=False):
     df = pd.DataFrame(data, columns=['value'])
