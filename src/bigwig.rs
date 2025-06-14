@@ -3,7 +3,6 @@ use bigtools::BigWigRead;
 use hdf5::{File, Group};
 use indicatif::ProgressStyle;
 use itertools::Itertools;
-use ndarray::{Array1, ArrayView1};
 use pyo3::prelude::*;
 use reqwest::Url;
 use std::cmp::min;
@@ -84,17 +83,16 @@ impl Stats {
 /// Formats the sum of two numbers as string.
 #[pyfunction]
 #[pyo3(
-    signature = (input, output, *, compression_level=9, precision=0.0, verify=false),
-    text_signature = "(input, output, *, compression_level=9, precision=0.0, verify=False)",
+    signature = (input, output, *, zfp=None, compression_level=19, tolerance=0.0),
+    text_signature = "(input, output, *, zfp=None, compression_level=19, tolerance=0.0)",
 )]
 pub fn bw_to_w5z(
     input: &str,
     output: PathBuf,
+    zfp: Option<bool>,
     compression_level: u8,
-    precision: f64,
-    verify: bool,
+    tolerance: f64,
 ) -> Result<()> {
-    hdf5::filters::blosc_set_nthreads(128);
     let h5 = File::create(output)?;
 
     if is_url(input) {
@@ -103,12 +101,12 @@ pub fn bw_to_w5z(
             download_file(input, &mut temp).await.unwrap();
             temp.rewind()?;
             let mut bw = BigWigRead::open(temp)?;
-            save_bw(&mut bw, &h5, compression_level, precision, verify)
+            save_bw(&mut bw, &h5, zfp, compression_level, tolerance)
         })?;
     } else {
         let file = std::fs::File::open(input)?;
         let mut bw = BigWigRead::open(file)?;
-        save_bw(&mut bw, &h5, compression_level, precision, verify)?;
+        save_bw(&mut bw, &h5, zfp, compression_level, tolerance)?;
     }
 
     Ok(())
@@ -117,9 +115,9 @@ pub fn bw_to_w5z(
 fn save_bw<R: Read + Seek>(
     bw: &mut BigWigRead<R>,
     h5: &Group,
+    mut zfp: Option<bool>,
     compression_level: u8,
     precision: f64,
-    verify: bool,
 ) -> Result<()> {
     let style = ProgressStyle::with_template(
         "[{elapsed}] {wide_bar:.cyan/blue} {pos:>7}/{len:7} (eta: {eta})",
@@ -134,34 +132,23 @@ fn save_bw<R: Read + Seek>(
     let pb = indicatif::ProgressBar::new(chromosomes.iter().map(|x| x.length as u64).sum::<u64>())
         .with_style(style);
     let mut stats = Stats::new();
+    let mut total_size = 0u64;
+    let mut compressed_size = 0u64;
     chromosomes.into_iter().for_each(|chrom| {
         let mut vals = bw.values(&chrom.name, 0, chrom.length).unwrap();
         fix_nan(&mut vals, Some(0.0));
         for &x in vals.iter() {
             stats.add(x);
         }
-
-        write_data(
-            &h5,
-            &chrom.name,
-            encode_zfp(&vals, precision).unwrap(),
-            compression_level,
-        )
-        .unwrap();
-
-        if verify {
-            let data = read_data(&h5, &chrom.name).unwrap();
-            assert_eq!(data.len(), vals.len());
-            for (a, b) in data.iter().zip(vals.iter()) {
-                assert!(((a - *b).abs() as f64) < precision);
-            }
-        }
+        total_size += vals.len() as u64 * 4; // 4 bytes per f32
+        compressed_size += write_data(&h5, &chrom.name, &vals, &mut zfp, precision, compression_level).unwrap() as u64;
 
         pb.inc(chrom.length as u64);
     });
 
     stats.write_metadata(h5)?;
 
+    log::info!("Compression ratio: {:.2}%", compressed_size as f64 / total_size as f64 * 100.0);
     log::info!(
         "Sum: {}, Min: {}, Max: {}, Mean: {}, StdDev: {}",
         stats.sum(),
@@ -194,54 +181,48 @@ fn fix_nan(data: &mut Vec<f32>, min: Option<f32>) {
     }
 }
 
-fn read_data(h5: &Group, name: &str) -> Result<Vec<f32>> {
-    let dataset = h5.dataset(name)?;
-    let data: Array1<u8> = dataset.read()?;
-    let decoded: Array1<f32> = numcodecs_zfp::decompress(data.as_slice().unwrap())?
-        .as_typed::<f32>()
-        .unwrap()
-        .to_owned()
-        .into_dimensionality()?;
-    Ok(decoded.to_vec())
-}
+fn write_data(h5: &Group, name: &str, data: &[f32], zfp: &mut Option<bool>, precision: f64, compression_level: u8) -> Result<usize> {
+    let (codec, data) = crate::w5z::encode_z(data, zfp.clone(), precision, compression_level).unwrap();
 
-fn write_data(h5: &Group, name: &str, data: Vec<u8>, compression_level: u8) -> Result<()> {
-    let mut builder = h5.new_dataset::<u8>();
-    if compression_level > 0 {
-        builder = builder.blosc_zstd(compression_level, hdf5::filters::BloscShuffle::Byte);
-    }
-    builder
+    h5.new_dataset::<u8>()
         .shape([data.len()])
         .create(name)
         .unwrap()
         .write(&data)
         .unwrap();
     let dataset = h5.dataset(name)?;
-    let attr = dataset
+    dataset
         .new_attr::<hdf5::types::VarLenUnicode>()
-        .create("dtype")?;
-    let value_: hdf5::types::VarLenUnicode = "float32".parse().unwrap();
-    attr.write_scalar(&value_)?;
-    let attr = dataset
+        .create("dtype")?
+        .write_scalar(&"float32".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
+    dataset
         .new_attr::<hdf5::types::VarLenUnicode>()
-        .create("encoding")?;
-    let value_: hdf5::types::VarLenUnicode = "zfp".parse().unwrap();
-    attr.write_scalar(&value_)?;
-    Ok(())
-}
+        .create("encoding")?
+        .write_scalar(&"zfp".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
+    dataset
+        .new_attr::<u64>()
+        .create("zstd_size")?
+        .write_scalar(&codec.zstd_src_size)?;
 
-/// Encode the data using ZFP compression with a specified precision.
-fn encode_zfp(data: &[f32], precision: f64) -> Result<Vec<u8>> {
-    let arr = ArrayView1::from(data);
-    let mode = if precision == 0.0 {
-        numcodecs_zfp::ZfpCompressionMode::Reversible
-    } else {
-        numcodecs_zfp::ZfpCompressionMode::FixedAccuracy {
-            tolerance: precision,
-        }
-    };
-    let encoded_data = numcodecs_zfp::compress(arr, &mode)?;
-    Ok(encoded_data)
+    let use_zfp = codec.zfp.is_some();
+    dataset
+        .new_attr::<bool>()
+        .create("zfp")?
+        .write_scalar(&use_zfp)?;
+    if use_zfp {
+        dataset
+            .new_attr::<f64>()
+            .create("tolerance")?
+            .write_scalar(&codec.zfp.unwrap())?;
+    }
+
+    // Update zfp 
+    if zfp.is_none() {
+        log::info!("Using ZFP compression: {}", use_zfp);
+        *zfp = Some(use_zfp);
+    }
+        
+    Ok(data.len())
 }
 
 fn is_url(src: &str) -> bool {

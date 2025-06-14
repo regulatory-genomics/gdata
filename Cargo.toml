@@ -8,12 +8,12 @@ name = "gdata"
 crate-type = ["cdylib"]
 
 [dependencies]
+zstd = { version = "0.13", features = ["zstdmt"] }
 anyhow = "1.0"
 ndarray = "0.16"
 bigtools = "0.5.6"
 itertools = "0.14"
-hdf5 = { package = "hdf5-metno", version = "0.10", features = ["f16", "blosc", "blosc-zstd"] }
-blosc-src = { version = "0.3.0", features = ["zstd"] }
+hdf5 = { package = "hdf5-metno", version = "0.10" }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
 indicatif = "0.17"
 log = "0.4"
@@ -27,6 +27,7 @@ reqwest = { version = "0.12", features = ["stream"] }
 tokio-stream = "0.1"
 tempfile = "3.20.0"
 numpy = "0.24"
+bincode = "2"
 
 [dependencies.pyo3]
 version = "0.24"
