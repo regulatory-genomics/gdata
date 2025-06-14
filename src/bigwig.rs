@@ -157,7 +157,7 @@ fn save_bw<R: Read + Seek>(
     stats.write_metadata(h5)?;
 
     log::info!(
-        "Sum: {}, Min: {}, Max: {}, Mean: {:.3}, StdDev: {:.3}",
+        "Sum: {}, Min: {}, Max: {}, Mean: {}, StdDev: {}",
         stats.sum(),
         stats.min(),
         stats.max(),

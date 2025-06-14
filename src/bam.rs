@@ -1,18 +1,18 @@
-use std::path::Path;
-use std::{io::Read, path::PathBuf};
+use anyhow::Result;
 use bed_utils::bed::map::GIntervalMap;
 use bed_utils::bed::{BEDLike, BedGraph, MergeBed, SortBed, Strand, BED};
 use bigtools::BigWigWrite;
 use bstr::BString;
 use itertools::Itertools;
-use noodles::bam;
-use anyhow::Result;
+use noodles::bam::{self, Record};
 use noodles::sam;
-use pyo3::prelude::*;
-use noodles::sam::header::{Header, ReferenceSequences};
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::cigar::Op;
 use noodles::sam::alignment::record_buf::Cigar;
+use noodles::sam::header::{Header, ReferenceSequences};
+use pyo3::prelude::*;
+use std::path::Path;
+use std::{io::Read, path::PathBuf};
 
 #[derive(Debug)]
 struct Stats {
@@ -21,7 +21,6 @@ struct Stats {
     n_secondary: usize,
     n_supplementary: usize,
     n_paired: usize,
-    n_spliced: usize,
 }
 
 impl Stats {
@@ -32,7 +31,6 @@ impl Stats {
             n_secondary: 0,
             n_supplementary: 0,
             n_paired: 0,
-            n_spliced: 0,
         }
     }
 }
@@ -109,13 +107,11 @@ impl SpliceSegments {
             segments: splice_segments,
         })
     }
-
-    pub fn num_segments(&self) -> usize {
-        self.segments.len()
-    }
 }
 
-fn read_malformed_header<R: std::io::Read>(reader: &mut bam::io::reader::Reader<R>) -> Result<Header> {
+fn read_malformed_header<R: std::io::Read>(
+    reader: &mut bam::io::reader::Reader<R>,
+) -> Result<Header> {
     let mut header_reader = reader.header_reader();
     header_reader.read_magic_number()?;
     let mut raw_sam_header_reader = header_reader.raw_sam_header_reader()?;
@@ -123,64 +119,92 @@ fn read_malformed_header<R: std::io::Read>(reader: &mut bam::io::reader::Reader<
     raw_sam_header_reader.read_to_string(&mut raw_header)?;
     raw_sam_header_reader.discard_to_end()?;
 
-    Ok(Header::builder().set_reference_sequences(header_reader.read_reference_sequences()?).build())
+    Ok(Header::builder()
+        .set_reference_sequences(header_reader.read_reference_sequences()?)
+        .build())
 }
 
 #[pyfunction]
-pub fn bam_cov(input: PathBuf, output: PathBuf) -> Result<()> {
+#[pyo3(
+    signature = (input, output, *, output2=None, stranded=false),
+    text_signature = "(input, output, *, output2=None, stranded=False)",
+)]
+pub fn bam_cov(
+    input: PathBuf,
+    output: PathBuf,
+    output2: Option<PathBuf>,
+    stranded: bool,
+) -> Result<()> {
     let mut stats = Stats::new();
 
     let mut reader = bam::io::reader::Builder::default().build_from_path(input)?;
     let header = read_malformed_header(&mut reader)?;
-    
-    let fragments = reader.records().flat_map(|record| {
-        let record = record.unwrap();
-        stats.n_total += 1;
 
-        let flag = record.flags();
-        if flag.is_segmented() {
-            stats.n_paired += 1;
-        }
-        if flag.is_unmapped() {
-            stats.n_unmapped += 1;
-            None
-        } else {
-            if flag.is_secondary() {
-                stats.n_secondary += 1;
-                None
-            } else if flag.is_supplementary() {
-                stats.n_supplementary += 1;
+    let fragments = reader
+        .records()
+        .flat_map(|record| {
+            let record = record.unwrap();
+            stats.n_total += 1;
+
+            let flag = record.flags();
+            if flag.is_segmented() {
+                stats.n_paired += 1;
+            }
+            if flag.is_unmapped() {
+                stats.n_unmapped += 1;
                 None
             } else {
-                let spliced_segments = SpliceSegments::new(&record).unwrap();
-                if spliced_segments.num_segments() > 1 {
-                    stats.n_spliced += 1;
-                }
-                let ref_id = record.reference_sequence_id().unwrap().unwrap();
-                let chrom = header.reference_sequences().get_index(ref_id).unwrap().0.to_string();
-                let strand = if flag.is_reverse_complemented() {
-                    Strand::Reverse
+                if flag.is_secondary() {
+                    stats.n_secondary += 1;
+                    None
+                } else if flag.is_supplementary() {
+                    stats.n_supplementary += 1;
+                    None
                 } else {
-                    Strand::Forward
-                };
-                let beds = spliced_segments.segments.into_iter().map(move |segment| {
-                    BED::<6>::new(
-                        &chrom, 
-                        segment.start, 
-                        segment.end, 
-                        None,
-                        None,
-                        Some(strand.clone()),
-                        Default::default(),
-                    )
-                }).collect::<Vec<_>>();
-                Some(beds)
+                    bam_to_bed(record, &header, true)
+                }
             }
-        }
-    }).flatten().sort_bed().unwrap().map(|x| x.unwrap());
+        })
+        .flatten()
+        .sort_bed()
+        .unwrap()
+        .map(|x| x.unwrap());
 
-    let bedgraph = create_bedgraph_from_sorted_fragments(fragments, header.reference_sequences(), 1, None, None, Some(Normalization::RPKM), None, None);
-    create_bigwig_from_bedgraph(bedgraph.into_iter(), header.reference_sequences(), output)?;
+    if stranded {
+        let output2 = output2
+            .ok_or_else(|| anyhow::anyhow!("Output2 path is required when stranded is true"))?;
+        let (fragments1, fragments2) = fragments.tee();
+
+        for (frag, strand, out) in [
+            (fragments1, Strand::Forward, output),
+            (fragments2, Strand::Reverse, output2),
+        ] {
+            let bedgraph = create_bedgraph_from_sorted_fragments(
+                frag.filter(|x| x.strand() == Some(strand)),
+                header.reference_sequences(),
+                1,
+                None,
+                None,
+                Some(Normalization::CPM),
+                None,
+                None,
+            );
+            create_bigwig_from_bedgraph(bedgraph.into_iter(), header.reference_sequences(), out)?;
+        }
+    } else {
+        let bedgraph = create_bedgraph_from_sorted_fragments(
+            fragments,
+            header.reference_sequences(),
+            1,
+            None,
+            None,
+            Some(Normalization::CPM),
+            None,
+            None,
+        );
+        create_bigwig_from_bedgraph(bedgraph.into_iter(), header.reference_sequences(), output)?;
+    }
+
     Ok(())
 }
 
@@ -218,21 +242,22 @@ where
     B: BEDLike,
 {
     let mut norm_factor = 0u64;
-    let mut bedgraph: Vec<BedGraph<f64>> = fragments.flat_map(|frag| {
-        if blacklist_regions.map_or(false, |bl| bl.is_overlapped(&frag)) {
-            None
-        } else {
-            if include_for_norm.map_or(true, |x| x.is_overlapped(&frag))
-                && !exclude_for_norm.map_or(false, |x| x.is_overlapped(&frag))
-            {
-                norm_factor += frag.len();
+    let mut bedgraph: Vec<BedGraph<f64>> = fragments
+        .flat_map(|frag| {
+            if blacklist_regions.map_or(false, |bl| bl.is_overlapped(&frag)) {
+                None
+            } else {
+                if include_for_norm.map_or(true, |x| x.is_overlapped(&frag))
+                    && !exclude_for_norm.map_or(false, |x| x.is_overlapped(&frag))
+                {
+                    norm_factor += frag.len();
+                }
+                let mut frag = BedGraph::from_bed(&frag, 1.0f64);
+                fit_to_bin(&mut frag, bin_size);
+                Some(frag)
             }
-            let mut frag = BedGraph::from_bed(&frag, 1.0f64);
-            fit_to_bin(&mut frag, bin_size);
-            Some(frag)
-        }
-    })
-    .merge_sorted_bedgraph()
+        })
+        .merge_sorted_bedgraph()
         .flat_map(|x| clip_bed(x, chrom_sizes))
         .collect();
 
@@ -409,3 +434,64 @@ pub enum Normalization {
     RPGC, // Reads per genomic content. RPGC (per bin) =
           // number of reads per bin / scaling factor for 1x average coverage.
 }
+
+fn bam_to_bed(record: Record, header: &Header, to_insertion: bool) -> Option<Vec<BED<6>>> {
+    let flag = record.flags();
+    let ref_id = record.reference_sequence_id().unwrap().unwrap();
+    let chrom = header
+        .reference_sequences()
+        .get_index(ref_id)
+        .unwrap()
+        .0
+        .to_string();
+    let strand = if flag.is_reverse_complemented() {
+        Strand::Reverse
+    } else {
+        Strand::Forward
+    };
+    let spliced_segments = SpliceSegments::new(&record).unwrap();
+
+    if to_insertion {
+        if strand == Strand::Forward {
+            let segment = spliced_segments.segments.into_iter().next()?;
+            Some(vec![BED::<6>::new(
+                &chrom,
+                segment.start,
+                segment.start+1,
+                None,
+                None,
+                Some(strand),
+                Default::default(),
+            )])
+        } else {
+            let segment = spliced_segments.segments.into_iter().last()?;
+            Some(vec![BED::<6>::new(
+                &chrom,
+                segment.end-1,
+                segment.end,
+                None,
+                None,
+                Some(strand),
+                Default::default(),
+            )])
+        }
+    } else {
+        let beds = spliced_segments
+            .segments
+            .into_iter()
+            .map(move |segment| {
+                BED::<6>::new(
+                    &chrom,
+                    segment.start,
+                    segment.end,
+                    None,
+                    None,
+                    Some(strand.clone()),
+                    Default::default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Some(beds)
+    }
+}
+ 
