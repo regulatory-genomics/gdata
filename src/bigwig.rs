@@ -141,7 +141,7 @@ fn save_bw<R: Read + Seek>(
             stats.add(x);
         }
         total_size += vals.len() as u64 * 4; // 4 bytes per f32
-        compressed_size += write_data(&h5, &chrom.name, &vals, &mut zfp, precision, compression_level).unwrap() as u64;
+        compressed_size += crate::w5z::write_z(&h5, &chrom.name, &vals, &mut zfp, precision, compression_level).unwrap() as u64;
 
         pb.inc(chrom.length as u64);
     });
@@ -179,50 +179,6 @@ fn fix_nan(data: &mut Vec<f32>, min: Option<f32>) {
             *x = d_min;
         }
     }
-}
-
-fn write_data(h5: &Group, name: &str, data: &[f32], zfp: &mut Option<bool>, precision: f64, compression_level: u8) -> Result<usize> {
-    let (codec, data) = crate::w5z::encode_z(data, zfp.clone(), precision, compression_level).unwrap();
-
-    h5.new_dataset::<u8>()
-        .shape([data.len()])
-        .create(name)
-        .unwrap()
-        .write(&data)
-        .unwrap();
-    let dataset = h5.dataset(name)?;
-    dataset
-        .new_attr::<hdf5::types::VarLenUnicode>()
-        .create("dtype")?
-        .write_scalar(&"float32".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
-    dataset
-        .new_attr::<hdf5::types::VarLenUnicode>()
-        .create("encoding")?
-        .write_scalar(&"zfp".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
-    dataset
-        .new_attr::<u64>()
-        .create("zstd_size")?
-        .write_scalar(&codec.zstd_src_size)?;
-
-    let use_zfp = codec.zfp.is_some();
-    dataset
-        .new_attr::<bool>()
-        .create("zfp")?
-        .write_scalar(&use_zfp)?;
-    if use_zfp {
-        dataset
-            .new_attr::<f64>()
-            .create("tolerance")?
-            .write_scalar(&codec.zfp.unwrap())?;
-    }
-
-    // Update zfp 
-    if zfp.is_none() {
-        log::info!("Using ZFP compression: {}", use_zfp);
-        *zfp = Some(use_zfp);
-    }
-        
-    Ok(data.len())
 }
 
 fn is_url(src: &str) -> bool {

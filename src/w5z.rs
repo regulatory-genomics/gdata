@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bincode::config::Configuration;
-use hdf5::File;
+use hdf5::{File, Group};
 use ndarray::{Array1, ArrayView1};
-use numpy::PyArray1;
+use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
@@ -19,11 +19,20 @@ pub struct W5Z {
 impl W5Z {
     #[new]
     #[pyo3(
-        signature = (filename),
-        text_signature = "($self, filename)"
+        signature = (filename, mode = "r"),
+        text_signature = "($self, filename, mode='r')"
     )]
-    fn new(filename: PathBuf) -> Result<Self> {
-        let inner = File::open(filename)?;
+    fn new(filename: PathBuf, mode: &str) -> Result<Self> {
+        let inner = match mode {
+            "r" => File::open(filename)?,
+            "w" => {
+                if filename.exists() {
+                    bail!("File already exists: {}", filename.display());
+                }
+                File::create(filename)?
+            },
+            _ => bail!("Invalid mode: {}", mode),
+        };
         Ok(Self { inner })
     }
 
@@ -44,6 +53,19 @@ impl W5Z {
         let zfp = dataset.attr("zfp")?.read_scalar::<bool>()?;
         let arr = decode_z(&dataset.read_1d()?, zfp, size as usize)?;
         Ok(PyArray1::from_owned_array(py, arr))
+    }
+
+    fn __setitem__(&self, key: &str, value: PyReadonlyArray1<'_, f32>) -> Result<()> {
+        let group = self.inner.group("/")?;
+        write_z(
+            &group,
+            key,
+            value.as_slice()?,
+            &mut Some(false), // zfp is not set yet
+            0.0, // default precision
+            19, // default compression level
+        )?;
+        Ok(())
     }
 
     fn verify(&self, py: Python) -> Result<()> {
@@ -77,6 +99,49 @@ impl W5Z {
 pub struct Codec {
     pub zfp: Option<f64>,
     pub zstd_src_size: u64,
+}
+
+pub fn write_z(h5: &Group, name: &str, data: &[f32], zfp: &mut Option<bool>, precision: f64, compression_level: u8) -> Result<usize> {
+    let (codec, data) = encode_z(data, zfp.clone(), precision, compression_level).unwrap();
+    h5.new_dataset::<u8>()
+        .shape([data.len()])
+        .create(name)
+        .unwrap()
+        .write(&data)
+        .unwrap();
+    let dataset = h5.dataset(name)?;
+    dataset
+        .new_attr::<hdf5::types::VarLenUnicode>()
+        .create("dtype")?
+        .write_scalar(&"float32".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
+    dataset
+        .new_attr::<hdf5::types::VarLenUnicode>()
+        .create("encoding")?
+        .write_scalar(&"zfp".parse::<hdf5::types::VarLenUnicode>().unwrap())?;
+    dataset
+        .new_attr::<u64>()
+        .create("zstd_size")?
+        .write_scalar(&codec.zstd_src_size)?;
+
+    let use_zfp = codec.zfp.is_some();
+    dataset
+        .new_attr::<bool>()
+        .create("zfp")?
+        .write_scalar(&use_zfp)?;
+    if use_zfp {
+        dataset
+            .new_attr::<f64>()
+            .create("tolerance")?
+            .write_scalar(&codec.zfp.unwrap())?;
+    }
+
+    // Update zfp 
+    if zfp.is_none() {
+        log::info!("Using ZFP compression: {}", use_zfp);
+        *zfp = Some(use_zfp);
+    }
+        
+    Ok(data.len())
 }
 
 /// Encode the data using ZFP compression with a specified precision.
