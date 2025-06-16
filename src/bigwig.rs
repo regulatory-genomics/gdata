@@ -120,7 +120,7 @@ fn save_bw<R: Read + Seek>(
     precision: f64,
 ) -> Result<()> {
     let style = ProgressStyle::with_template(
-        "[{elapsed}] {wide_bar:.cyan/blue} {pos:>7}/{len:7} (eta: {eta})",
+        "[{elapsed}] {wide_bar:.cyan/blue} {percent}/100% (eta: {eta})",
     )
     .unwrap();
     let chromosomes: Vec<_> = bw
