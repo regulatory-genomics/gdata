@@ -87,6 +87,24 @@ impl W5Z {
         Ok(())
     }
 
+    fn update_stat(&self, py: Python) -> Result<()> {
+        let group = self.inner.group("/")?;
+        let stats = self.compute_stat(py)?;
+        stats.write_metadata(&group)?;
+        Ok(())
+    }
+
+    fn compute_stat(&self, py: Python) -> Result<Statistics> {
+        let mut stats = Statistics::new();
+        for key in self.keys()? {
+            let data = self.__getitem__(py, &key)?;
+            for x in data.try_iter()? {
+                stats.add(x?.extract::<f32>()?);
+            }
+        }
+        Ok(stats)
+    }
+
     fn __repr__(&self) -> String {
         self.__str__()
     }
@@ -95,6 +113,74 @@ impl W5Z {
         format!("W5Z object with keys: {}", self.keys().unwrap().join(", "))
     }
 }
+
+#[pyclass]
+pub struct Statistics {
+    min: f64,
+    max: f64,
+    sum_x: f64,
+    sum_x2: f64,
+    n: usize,
+}
+
+impl Statistics {
+    pub fn new() -> Self {
+        Self {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            sum_x: 0.0,
+            sum_x2: 0.0,
+            n: 0,
+        }
+    }
+
+    pub fn add(&mut self, x: f32) {
+        if x.is_finite() {
+            self.min = self.min.min(x.into());
+            self.max = self.max.max(x.into());
+            self.sum_x += x as f64;
+            self.sum_x2 += (x * x) as f64;
+            self.n += 1;
+        }
+    }
+
+    pub fn sum(&self) -> f64 {
+        self.sum_x
+    }
+
+    pub fn min(&self) -> f64 {
+        self.min
+    }
+
+    pub fn max(&self) -> f64 {
+        self.max
+    }
+
+    pub fn mean(&self) -> f64 {
+        self.sum_x / self.n as f64
+    }
+
+    pub fn stddev(&self) -> f64 {
+        let mean = self.mean();
+        (self.sum_x2 / self.n as f64) - (mean * mean)
+    }
+
+    pub fn write_metadata(&self, group: &Group) -> Result<()> {
+        let attr = group.new_attr::<f64>().create("mean")?;
+        attr.write_scalar(&self.mean())?;
+        let attr = group.new_attr::<f64>().create("min")?;
+        attr.write_scalar(&self.min())?;
+        let attr = group.new_attr::<f64>().create("max")?;
+        attr.write_scalar(&self.max())?;
+        let attr = group.new_attr::<f64>().create("stddev")?;
+        attr.write_scalar(&self.stddev())?;
+        let attr = group.new_attr::<f64>().create("sum")?;
+        attr.write_scalar(&self.sum())?;
+        Ok(())
+    }
+}
+
+
 
 pub struct Codec {
     pub zfp: Option<f64>,

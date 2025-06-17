@@ -15,70 +15,7 @@ use tokio_stream::StreamExt;
 use indicatif::ProgressBar;
 use reqwest::Client;
 
-pub struct Stats {
-    min: f64,
-    max: f64,
-    sum_x: f64,
-    sum_x2: f64,
-    n: usize,
-}
-
-impl Stats {
-    pub fn new() -> Self {
-        Stats {
-            min: f64::INFINITY,
-            max: f64::NEG_INFINITY,
-            sum_x: 0.0,
-            sum_x2: 0.0,
-            n: 0,
-        }
-    }
-
-    pub fn add(&mut self, x: f32) {
-        if x.is_finite() {
-            self.min = self.min.min(x.into());
-            self.max = self.max.max(x.into());
-            self.sum_x += x as f64;
-            self.sum_x2 += (x * x) as f64;
-            self.n += 1;
-        }
-    }
-
-    pub fn sum(&self) -> f64 {
-        self.sum_x
-    }
-
-    pub fn min(&self) -> f64 {
-        self.min
-    }
-
-    pub fn max(&self) -> f64 {
-        self.max
-    }
-
-    pub fn mean(&self) -> f64 {
-        self.sum_x / self.n as f64
-    }
-
-    pub fn stddev(&self) -> f64 {
-        let mean = self.mean();
-        (self.sum_x2 / self.n as f64) - (mean * mean)
-    }
-
-    pub fn write_metadata(&self, group: &Group) -> Result<()> {
-        let attr = group.new_attr::<f64>().create("mean")?;
-        attr.write_scalar(&self.mean())?;
-        let attr = group.new_attr::<f64>().create("min")?;
-        attr.write_scalar(&self.min())?;
-        let attr = group.new_attr::<f64>().create("max")?;
-        attr.write_scalar(&self.max())?;
-        let attr = group.new_attr::<f64>().create("stddev")?;
-        attr.write_scalar(&self.stddev())?;
-        let attr = group.new_attr::<f64>().create("sum")?;
-        attr.write_scalar(&self.sum())?;
-        Ok(())
-    }
-}
+use crate::w5z::Statistics;
 
 /// Formats the sum of two numbers as string.
 #[pyfunction]
@@ -131,7 +68,7 @@ fn save_bw<R: Read + Seek>(
         .collect();
     let pb = indicatif::ProgressBar::new(chromosomes.iter().map(|x| x.length as u64).sum::<u64>())
         .with_style(style);
-    let mut stats = Stats::new();
+    let mut stats = Statistics::new();
     let mut total_size = 0u64;
     let mut compressed_size = 0u64;
     chromosomes.into_iter().for_each(|chrom| {
