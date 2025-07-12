@@ -10,15 +10,18 @@ crate-type = ["cdylib"]
 [dependencies]
 zstd = { version = "0.13", features = ["zstdmt"] }
 anyhow = "1.0"
-ndarray = "0.16"
+average = "0.16"
+ndarray = { version = "0.16", features = ["serde"] }
 bigtools = "0.5.6"
+bincode = { version = "2", features = ["serde"] }
 itertools = "0.14"
+half = { version = "2.6", features = ["serde"] }
 hdf5 = { package = "hdf5-metno", version = "0.10" }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
 indicatif = "0.17"
 log = "0.4"
 pyo3-log = "0.12"
-noodles = { version = "0.99.0", features = ["sam", "bam"] }
+noodles = { version = "0.99.0", features = ["core", "fasta", "sam", "bam"] }
 bed-utils = "0.9"
 tokio = "1.34"
 bstr = "1"
@@ -26,9 +29,10 @@ numcodecs-zfp = "0.5"
 reqwest = { version = "0.12", features = ["stream"] }
 tokio-stream = "0.1"
 tempfile = "3.20.0"
-numpy = "0.24"
-bincode = "2"
+serde_json = "1.0"
+numpy = "0.25"
+rayon = "1.10"
 
 [dependencies.pyo3]
-version = "0.24"
+version = "0.25"
 features = ["extension-module", "anyhow"]

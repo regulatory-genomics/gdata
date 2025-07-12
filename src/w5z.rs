@@ -4,7 +4,7 @@ use hdf5::{File, Group};
 use ndarray::{Array1, ArrayView1};
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /** W5Z object is a zfp compressed basepair resolution data format for representing genome-wide
  * coverage data, such as ChIP-seq, ATAC-seq, and other genomic signals.
@@ -13,6 +13,29 @@ use std::path::PathBuf;
 #[repr(transparent)]
 pub struct W5Z {
     inner: File,
+}
+
+impl W5Z {
+    pub fn open(filename: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self { inner: File::open(filename)? })
+    }
+ 
+    pub fn get(&self, key: &str) -> Result<Array1<f32>> {
+        let group = self.inner.group("/")?;
+        let dataset = group.dataset(key)?;
+        let size = dataset.attr("zstd_size")?.read_scalar::<u64>()?;
+        let zfp = dataset.attr("zfp")?.read_scalar::<bool>()?;
+        let arr = decode_z(&dataset.read_1d()?, zfp, size as usize)?;
+        Ok(arr)
+    }
+
+    pub fn contains(&self, key: &str) -> Result<bool> {
+        let group = self.inner.group("/")?;
+        match group.dataset(key) {
+            Ok(_) => Ok(true),
+            _ => Ok(false),
+        }
+    }
 }
 
 #[pymethods]
@@ -47,11 +70,7 @@ impl W5Z {
     }
 
     fn __getitem__<'py>(&'py self, py: Python<'py>, key: &str) -> Result<Bound<'py, PyArray1<f32>>> {
-        let group = self.inner.group("/")?;
-        let dataset = group.dataset(key)?;
-        let size = dataset.attr("zstd_size")?.read_scalar::<u64>()?;
-        let zfp = dataset.attr("zfp")?.read_scalar::<bool>()?;
-        let arr = decode_z(&dataset.read_1d()?, zfp, size as usize)?;
+        let arr = self.get(key)?;
         Ok(PyArray1::from_owned_array(py, arr))
     }
 
@@ -68,18 +87,10 @@ impl W5Z {
         Ok(())
     }
 
-    fn verify(&self, py: Python) -> Result<()> {
-        let chromosomes: Vec<_> = self.keys()?;
-        let mut s = 0.0f64;
-        for chrom in chromosomes {
-            let data = self.__getitem__(py, &chrom)?;
-            for x in data.try_iter()? {
-                s += x?.extract::<f64>()?;
-            }
-        }
+    fn verify(&self, py: Python) -> Result<f64> {
         let real_s = self.inner.attr("sum")?.read_scalar::<f64>()?;
-        println!("Sum of all values: {}; Delta with ground truth: {}", s, (s - real_s).abs());
-        Ok(())
+        let stat = self.compute_stat(py)?;
+        Ok((stat.sum() - real_s).abs() / real_s)
     }
 
     fn close(&self) -> Result<()> {
