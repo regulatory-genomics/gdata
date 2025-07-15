@@ -87,6 +87,18 @@ impl W5Z {
         Ok(())
     }
 
+    fn list_attrs(&self) -> Result<Vec<String>> {
+        let group = self.inner.group("/")?;
+        let attrs = group.attr_names()?;
+        Ok(attrs)
+    }
+
+    fn attr(&self, key: &str) -> Result<f64> {
+        let group = self.inner.group("/")?;
+        let attr = group.attr(key)?;
+        Ok(attr.read_scalar::<f64>()?)
+    }
+
     fn verify(&self, py: Python) -> Result<f64> {
         let real_s = self.inner.attr("sum")?.read_scalar::<f64>()?;
         let stat = self.compute_stat(py)?;

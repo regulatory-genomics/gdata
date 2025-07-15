@@ -11,7 +11,8 @@ fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
 
     m.add_class::<w5z::W5Z>()?;
-    m.add_class::<data::GenomeData>()?;
+    m.add_class::<data::GenomeDataBuilder>()?;
+    m.add_class::<data::GenomeDataLoader>()?;
 
     m.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, m)?)?;
 

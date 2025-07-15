@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from gdata._gdata import W5Z, bam_cov, bw_to_w5z, GenomeData
+from gdata._gdata import W5Z, bam_cov, bw_to_w5z
 
 __all__ = ['bam_cov', 'balanced_sampling', 'bw_to_w5z', 'W5Z', 'GenomeData']
 
