@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
 use crate::w5z::W5Z;
+use crate::utils::PrefetchIterator;
 
 /** Represents a builder for genomic data, allowing for the creation and management of genomic datasets.
 
@@ -70,6 +71,23 @@ impl GenomeDataBuilder {
             window_size,
             resolution,
         })
+    }
+
+    fn iter_chunks(&self, buffer_size: usize) -> PrefetchIterator<(Sequences, Values)> {
+        let chroms = Box::new(
+            self.chrom_sizes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        let iter = DataChunkIter {
+            root: self.location.clone(),
+            chroms,
+            chunks: Box::new(std::iter::empty()),
+            keys: None,
+        };
+        PrefetchIterator::new(iter, buffer_size)
     }
 }
 
@@ -159,28 +177,6 @@ impl GenomeDataBuilder {
         self.chrom_sizes.keys().collect()
     }
 
-    pub fn keys(&self) -> Result<Vec<String>> {
-        self.iter_chunks()
-            .next()
-            .map(|chunk| chunk.keys())
-            .unwrap_or_else(|| Ok(vec![]))
-    }
-
-    pub fn iter_chunks(&self) -> DataChunkIter {
-        let chroms = Box::new(
-            self.chrom_sizes
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
-        DataChunkIter {
-            root: self.location.clone(),
-            chroms,
-            chunks: Box::new(std::iter::empty()),
-        }
-    }
-
     pub fn add_files(&self, files: HashMap<String, PathBuf>) -> Result<()> {
         files
             .into_iter()
@@ -243,11 +239,11 @@ impl GenomeDataBuilder {
 #[pyclass]
 pub struct GenomeDataLoader {
     data: GenomeDataBuilder,
-    keys: Vec<String>,
     batch_size: usize,
     buffer_seq: VecDeque<Array1<u8>>,
     buffer_data: VecDeque<ArrayD<f32>>,
-    chunks: DataChunkIter,
+    chunks: PrefetchIterator<(Sequences, Values)>,
+    prefetch: usize,
 }
 
 impl Iterator for GenomeDataLoader {
@@ -256,9 +252,7 @@ impl Iterator for GenomeDataLoader {
     fn next(&mut self) -> Option<Self::Item> {
         let n_buffer = self.buffer_seq.len();
         if n_buffer < self.batch_size {
-            if let Some(chunk) = self.chunks.next() {
-                let seqs = chunk.get_seqs().unwrap();
-                let values = chunk.gets(&self.keys).unwrap();
+            if let Some((seqs, values)) = self.chunks.next() {
                 self.buffer_seq.extend(seqs.iter_rows());
                 self.buffer_data.extend(values.iter_rows());
                 self.next()
@@ -303,26 +297,25 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8,
+            location, *, batch_size=8, prefetch=1,
         ),
-        text_signature = "($self, location, *, batch_size=8)"
+        text_signature = "($self, location, *, batch_size=8, prefetch=1)"
     )]
-    pub fn new(location: PathBuf, batch_size: usize) -> Result<Self> {
+    pub fn new(location: PathBuf, batch_size: usize, prefetch: usize) -> Result<Self> {
         let data = GenomeDataBuilder::open_(location)?;
-        let chunks = data.iter_chunks();
-        let keys = data.keys()?;
+        let chunks = data.iter_chunks(prefetch);
         Ok(Self {
             data,
             batch_size,
             buffer_seq: VecDeque::new(),
             buffer_data: VecDeque::new(),
             chunks,
-            keys,
+            prefetch,
         })
     }
 
     fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.chunks = slf.data.iter_chunks();
+        slf.chunks = slf.data.iter_chunks(slf.prefetch);
         slf.buffer_seq.clear();
         slf.buffer_data.clear(); 
         slf
@@ -339,19 +332,25 @@ impl GenomeDataLoader {
     This struct is used to iterate over genomic data chunks, providing access to each chunk's segments
     and associated data. It supports operations like retrieving the next chunk and iterating over the keys.
 */
-#[pyclass]
-pub struct DataChunkIter {
+struct DataChunkIter {
     root: PathBuf,
     chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
     chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
+    keys: Option<Vec<String>>,
 }
 
 impl Iterator for DataChunkIter {
-    type Item = DataChunk;
+    type Item = (Sequences, Values);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(path) = self.chunks.next() {
-            Some(DataChunk::open(path).unwrap())
+            let chunk = DataChunk::open(path).unwrap();
+            if self.keys.is_none() {
+                self.keys = Some(chunk.keys().unwrap());
+            }
+            let seqs = chunk.get_seqs().unwrap();
+            let values = chunk.gets(&chunk.keys().unwrap()).unwrap();
+            Some((seqs, values))
         } else {
             let chr = self.chroms.next()?;
             self.chunks = Box::new(
@@ -361,17 +360,6 @@ impl Iterator for DataChunkIter {
             );
             self.next()
         }
-    }
-}
-
-#[pymethods]
-impl DataChunkIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<DataChunk> {
-        slf.next()
     }
 }
 
