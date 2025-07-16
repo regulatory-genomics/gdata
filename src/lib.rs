@@ -11,6 +11,8 @@ use pyo3::prelude::*;
 fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
 
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
     m.add_class::<w5z::W5Z>()?;
     m.add_class::<data::GenomeDataBuilder>()?;
     m.add_class::<data::GenomeDataLoader>()?;
