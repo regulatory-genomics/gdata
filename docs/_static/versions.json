@@ -3,5 +3,11 @@
         "name": "dev",
         "version": "dev",
         "url": "https://lab.kaizhang.org/gdata/version/dev/"
+    },
+    {
+        "name": "0.1 (stable)",
+        "version": "0.1",
+        "preferred": true,
+        "url": "https://lab.kaizhang.org/gdata/version/0.1/"
     }
 ]
