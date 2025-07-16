@@ -42,7 +42,7 @@ impl W5Z {
 impl W5Z {
     #[new]
     #[pyo3(
-        signature = (filename, mode = "r"),
+        signature = (filename, mode="r"),
         text_signature = "($self, filename, mode='r')"
     )]
     fn new(filename: PathBuf, mode: &str) -> Result<Self> {
