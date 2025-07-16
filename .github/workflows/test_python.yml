@@ -59,7 +59,7 @@ jobs:
       run: |
         python -m pip install --user ${GITHUB_WORKSPACE}/wheel_files/*.whl
 
-    - name: Get precellar version
+    - name: Get version
       id: get-version
       run: |
         VERSION_NUMBER=$(python -c "import gdata;print(gdata.__version__)")
@@ -70,12 +70,12 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: wheel-files
-        path: ./wheel_files/precellar*.whl
+        path: ./wheel_files/gdata*.whl
 
   build-wheel:
     needs: build-and-test
     if: ${{ startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[wheel]') }}
-    uses: regulatory-genomics/precellar/.github/workflows/wheels.yml@main
+    uses: regulatory-genomics/gdata/.github/workflows/wheels.yml@main
 
   publish:
     needs: build-wheel
