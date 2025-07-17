@@ -29,6 +29,23 @@ use crate::utils::PrefetchIterator;
     This struct provides methods to create a new genomic dataset, open an existing dataset,
     and manage genomic data chunks. It supports operations like adding files, retrieving chromosome
     information, and iterating over data chunks.
+
+    Parameters
+    ----------
+    location
+        The directory where the genomic data will be stored.
+    genome_fasta
+        The path to the FASTA file containing the genome sequences.
+    window_size
+        The size of the genomic windows to be processed (default is 524288).
+    step_size
+        The step size for sliding the window across the genome (default is None, which uses `window_size`).
+    chunk_size
+        The number of segments to store in each chunk (default is 128).
+    resolution
+        The resolution of the stored genomic data (default is 1).
+    chroms
+        A list of chromosomes to include in the dataset. If None, all chromosomes in the FASTA file will be used.
 */
 #[pyclass]
 pub struct GenomeDataBuilder {
@@ -93,11 +110,6 @@ impl GenomeDataBuilder {
 
 #[pymethods]
 impl GenomeDataBuilder {
-    #[classmethod]
-    fn open(_cls: &Bound<'_, PyType>, location: PathBuf) -> Result<Self> {
-        Self::open_(location)
-    }
-
     #[new]
     #[pyo3(
         signature = (
@@ -105,7 +117,7 @@ impl GenomeDataBuilder {
         ),
         text_signature = "($self, location, genome_fasta, *, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None)"
     )]
-    pub fn new(
+    fn new(
         location: PathBuf,
         genome_fasta: PathBuf,
         window_size: u64,
@@ -173,11 +185,55 @@ impl GenomeDataBuilder {
         })
     }
 
-    pub fn chroms(&self) -> Vec<&String> {
+    /* Open an existing GenomeDataBuilder instance from a specified location.
+    
+       This method checks if the metadata file exists at the given location and initializes
+       the GenomeDataBuilder with the stored chromosome sizes, window size, and resolution.
+       
+       Parameters
+       ----------
+       location
+           The path to the directory containing the genomic data.
+       
+       Returns
+       -------
+       GenomeDataBuilder
+           An instance of GenomeDataBuilder initialized with the existing genomic data.
+    */
+    #[classmethod]
+    #[pyo3(
+        signature = (location),
+        text_signature = "(location)",
+    )]
+    fn open(_cls: &Bound<'_, PyType>, location: PathBuf) -> Result<Self> {
+        Self::open_(location)
+    }
+
+    /* Returns a vector of chromosome names present in the genomic data.
+    
+       Returns
+       -------
+       list[str]
+           A list of chromosome names as strings.
+    */
+    fn chroms(&self) -> Vec<&String> {
         self.chrom_sizes.keys().collect()
     }
 
-    pub fn add_files(&self, files: HashMap<String, PathBuf>) -> Result<()> {
+    /* Adds w5z files to the dataset.
+    
+       This method processes a batch of files, each associated with a key, and adds them to the genomic data.
+       
+       Parameters
+       ----------
+       files : dict[str, PathBuf]
+           A dictionary mapping keys to file paths.
+    */
+    #[pyo3(
+        signature = (files),
+        text_signature = "($self, files)",
+    )]
+    fn add_files(&self, files: HashMap<String, PathBuf>) -> Result<()> {
         files
             .into_iter()
             .chunks(64)
@@ -190,7 +246,25 @@ impl GenomeDataBuilder {
             })
     }
 
-    pub fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
+    /* Adds a single file to the dataset.
+    
+       This method processes a file associated with a key and adds it to the genomic data.
+       The data is read from a W5Z file, and stored in chunks. Each chunk has the
+       shape (num_segments, num_columns), where num_columns is determined by the
+       resolution. The values are averaged if the resolution is greater than 1.
+       
+       Parameters
+       ----------
+       key : str
+           The key associated with the file.
+       w5z : PathBuf
+           The path to the W5Z file containing genomic data.
+    */
+    #[pyo3(
+        signature = (key, w5z),
+        text_signature = "($self, key, w5z)",
+    )]
+    fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
         let n_cols = self.window_size / self.resolution;
         let w5z = W5Z::open(w5z)?;
         for chr in self.chroms() {
@@ -236,6 +310,26 @@ impl GenomeDataBuilder {
     }
 }
 
+/** A dataloader for genomic data, allowing for efficient retrieval of genomic
+    sequences and their associated values.
+    
+    This object provides an iterator over genomic data chunks, enabling batch
+    retrieval of genomic sequences and their associated values.
+    The iterator yields tuples of sequences and values,
+    where sequences has shape (batch_size, sequence_length), and values has shape
+    (batch_size, sequence_length / resolution, num_tracks).
+
+    Parameters
+    ----------
+    location
+        The path to the genomic data directory.
+    batch_size
+        The number of genomic sequences to retrieve in each batch (default is 8).
+    prefetch
+        The number of chunks to prefetch for efficient data loading (default is 1).
+        This allows for asynchronous loading of data, improving performance during training or inference.
+        But it will increase memory usage, so it should be set according to the available resources.
+*/
 #[pyclass]
 pub struct GenomeDataLoader {
     data: GenomeDataBuilder,
@@ -426,6 +520,12 @@ impl DataChunk {
         self.segments.len()
     }
 
+    fn keys(&self) -> Result<Vec<String>> {
+        std::fs::read_dir(self.location.join("data"))?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect()
+    }
+
     fn get_seqs(&self) -> Result<Sequences> {
         let seq_file = self.location.join("sequence.dat");
         let seqs = std::fs::read(seq_file)?;
@@ -468,7 +568,7 @@ impl DataChunk {
             .iter()
             .map(|arr| arr.view())
             .collect::<Vec<_>>();
-        Ok(Values(ndarray::stack(Axis(1), &values)?))
+        Ok(Values(ndarray::stack(Axis(2), &values)?))
     }
 
     fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
@@ -490,6 +590,7 @@ impl DataChunk {
     }
 }
 
+/*
 #[pymethods]
 impl DataChunk {
     fn keys(&self) -> Result<Vec<String>> {
@@ -538,6 +639,7 @@ impl DataChunk {
         format!("DataChunk at '{}'", self.location.display())
     }
 }
+*/
 
 /// Return the segments of the genome as an iterator.
 fn get_genome_segments(
