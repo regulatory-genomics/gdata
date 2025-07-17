@@ -4,7 +4,7 @@ use bincode::config::Configuration;
 use bincode::{Decode, Encode};
 use half::bf16;
 use itertools::Itertools;
-use ndarray::{Array1, Array2, ArrayD, Axis};
+use ndarray::{s, Array1, Array2, ArrayD, Axis};
 use noodles::core::Position;
 use noodles::fasta::{
     fai::Index,
@@ -90,7 +90,7 @@ impl GenomeDataBuilder {
         })
     }
 
-    fn iter_chunks(&self, buffer_size: usize) -> PrefetchIterator<(Sequences, Values)> {
+    fn iter_chunks(&self, buffer_size: usize, trim_length: Option<usize>) -> PrefetchIterator<(Sequences, Values)> {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -103,6 +103,7 @@ impl GenomeDataBuilder {
             chroms,
             chunks: Box::new(std::iter::empty()),
             keys: None,
+            trim_length,
         };
         PrefetchIterator::new(iter, buffer_size)
     }
@@ -185,7 +186,7 @@ impl GenomeDataBuilder {
         })
     }
 
-    /* Open an existing GenomeDataBuilder instance from a specified location.
+    /** Open an existing GenomeDataBuilder instance from a specified location.
     
        This method checks if the metadata file exists at the given location and initializes
        the GenomeDataBuilder with the stored chromosome sizes, window size, and resolution.
@@ -220,7 +221,7 @@ impl GenomeDataBuilder {
         self.chrom_sizes.keys().collect()
     }
 
-    /* Adds w5z files to the dataset.
+    /** Adds w5z files to the dataset.
     
        This method processes a batch of files, each associated with a key, and adds them to the genomic data.
        
@@ -246,7 +247,7 @@ impl GenomeDataBuilder {
             })
     }
 
-    /* Adds a single file to the dataset.
+    /** Adds a single file to the dataset.
     
        This method processes a file associated with a key and adds it to the genomic data.
        The data is read from a W5Z file, and stored in chunks. Each chunk has the
@@ -325,6 +326,14 @@ impl GenomeDataBuilder {
         The path to the genomic data directory.
     batch_size
         The number of genomic sequences to retrieve in each batch (default is 8).
+    trim_length
+        Trim both ends of the value vector according to the `trim_length` parameter.
+        As the result, the length of the values will be reduced by `2 * trim_length`.
+        Note this only affects the values, not the sequences. The sequences will always
+        have the full length as defined in the dataset.
+        This is useful when you want to compute the loss on only the central part of the sequence.
+        This is because the edges of the sequence may contain
+        padding or other artifacts that should not be considered in the loss computation.
     prefetch
         The number of chunks to prefetch for efficient data loading (default is 1).
         This allows for asynchronous loading of data, improving performance during training or inference.
@@ -337,6 +346,7 @@ pub struct GenomeDataLoader {
     buffer_seq: VecDeque<Array1<u8>>,
     buffer_data: VecDeque<ArrayD<f32>>,
     chunks: PrefetchIterator<(Sequences, Values)>,
+    trim_length: Option<usize>,
     prefetch: usize,
 }
 
@@ -391,25 +401,26 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8, prefetch=1,
+            location, *, batch_size=8, trim_length=None, prefetch=1,
         ),
-        text_signature = "($self, location, *, batch_size=8, prefetch=1)"
+        text_signature = "($self, location, *, batch_size=8, trim_length=None, prefetch=1)"
     )]
-    pub fn new(location: PathBuf, batch_size: usize, prefetch: usize) -> Result<Self> {
+    pub fn new(location: PathBuf, batch_size: usize, trim_length: Option<usize>, prefetch: usize) -> Result<Self> {
         let data = GenomeDataBuilder::open_(location)?;
-        let chunks = data.iter_chunks(prefetch);
+        let chunks = data.iter_chunks(prefetch, trim_length);
         Ok(Self {
             data,
             batch_size,
             buffer_seq: VecDeque::new(),
             buffer_data: VecDeque::new(),
             chunks,
+            trim_length,
             prefetch,
         })
     }
 
     fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.chunks = slf.data.iter_chunks(slf.prefetch);
+        slf.chunks = slf.data.iter_chunks(slf.prefetch, slf.trim_length);
         slf.buffer_seq.clear();
         slf.buffer_data.clear(); 
         slf
@@ -431,6 +442,7 @@ struct DataChunkIter {
     chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
     chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
     keys: Option<Vec<String>>,
+    trim_length: Option<usize>,
 }
 
 impl Iterator for DataChunkIter {
@@ -438,7 +450,11 @@ impl Iterator for DataChunkIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(path) = self.chunks.next() {
-            let chunk = DataChunk::open(path).unwrap();
+            let mut chunk = DataChunk::open(path).unwrap();
+            if let Some(trim_length) = self.trim_length {
+                chunk.set_trim_length(trim_length);
+            }
+
             if self.keys.is_none() {
                 self.keys = Some(chunk.keys().unwrap());
             }
@@ -487,6 +503,7 @@ impl Sequences {
 pub struct DataChunk {
     location: PathBuf,
     segments: Vec<GenomicRange>,
+    trim_length: Option<usize>,
 }
 
 impl DataChunk {
@@ -498,6 +515,7 @@ impl DataChunk {
         Ok(Self {
             location: location.as_ref().to_path_buf(),
             segments,
+            trim_length: None,
         })
     }
 
@@ -513,7 +531,11 @@ impl DataChunk {
             .lines()
             .map(|line| GenomicRange::from_str(line).unwrap())
             .collect();
-        Ok(Self { location, segments })
+        Ok(Self { location, segments, trim_length: None })
+    }
+
+    fn set_trim_length(&mut self, trim_length: usize) {
+        self.trim_length = Some(trim_length);
     }
 
     pub fn len(&self) -> usize {
@@ -548,7 +570,13 @@ impl DataChunk {
             &mut data,
             Configuration::default(),
         )?;
-        Ok(Some(data))
+        if let Some(trim_length) = self.trim_length {
+            let size = data.0.shape()[1];
+            let data = data.0.slice(s![.., trim_length..size - trim_length]);
+            Ok(Some(Values(data.into_dyn().to_owned())))
+        } else {
+            Ok(Some(data))
+        }
     }
 
     fn gets(&self, keys: &[String]) -> Result<Values> {
