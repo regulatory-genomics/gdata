@@ -10,17 +10,17 @@ use noodles::fasta::{
     fai::Index,
     io::{indexed_reader::Builder, IndexedReader},
 };
-use numpy::{PyArray2, PyArrayDyn};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
+use crate::dataloader::index::SegmentIndex;
 use crate::w5z::W5Z;
 use crate::utils::PrefetchIterator;
 
@@ -36,6 +36,8 @@ use crate::utils::PrefetchIterator;
         The directory where the genomic data will be stored.
     genome_fasta
         The path to the FASTA file containing the genome sequences.
+    segments
+        Optional list of genomic segments to include in the dataset. If None, the entire genome will be used.
     window_size
         The size of the genomic windows to be processed (default is 524288).
     step_size
@@ -53,10 +55,11 @@ pub struct GenomeDataBuilder {
     window_size: u64,
     resolution: u64,
     location: PathBuf,
+    pub(crate) index: SegmentIndex,
 }
 
 impl GenomeDataBuilder {
-    fn open_(location: impl AsRef<Path>) -> Result<Self> {
+    pub(super) fn open_(location: impl AsRef<Path>) -> Result<Self> {
         location
             .as_ref()
             .join("metadata.json")
@@ -80,6 +83,7 @@ impl GenomeDataBuilder {
                 Ok((k.clone(), size))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let index = SegmentIndex::new(location.as_ref(), chrom_sizes.keys());
         let resolution = metadata.get("resolution").unwrap().as_u64().unwrap();
         let window_size = metadata.get("window_size").unwrap().as_u64().unwrap();
         Ok(Self {
@@ -87,10 +91,11 @@ impl GenomeDataBuilder {
             location: location.as_ref().to_path_buf(),
             window_size,
             resolution,
+            index,
         })
     }
 
-    fn iter_chunks(&self, buffer_size: usize, trim_length: Option<usize>) -> PrefetchIterator<(Sequences, Values)> {
+    pub(super) fn iter_chunks(&self, buffer_size: usize, trim_target: Option<usize>) -> PrefetchIterator<(Sequences, Values)> {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -102,8 +107,8 @@ impl GenomeDataBuilder {
             root: self.location.clone(),
             chroms,
             chunks: Box::new(std::iter::empty()),
-            keys: None,
-            trim_length,
+            keys: self.keys().unwrap(),
+            trim_target,
         };
         PrefetchIterator::new(iter, buffer_size)
     }
@@ -114,28 +119,70 @@ impl GenomeDataBuilder {
     #[new]
     #[pyo3(
         signature = (
-            location, genome_fasta, *, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None,
+            location, genome_fasta, *, segments=None, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None,
         ),
-        text_signature = "($self, location, genome_fasta, *, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None)"
+        text_signature = "($self, location, genome_fasta, *, segments=None, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None)"
     )]
     fn new(
         location: PathBuf,
         genome_fasta: PathBuf,
+        segments: Option<Vec<String>>,
         window_size: u64,
         step_size: Option<u64>,
         chunk_size: usize,
         resolution: u64,
         chroms: Option<Vec<String>>,
     ) -> Result<Self> {
+        fn write_seqs(
+            input: impl IntoIterator<Item = (String, impl IntoIterator<Item = GenomicRange>)>,
+            location: &PathBuf,
+            fasta_reader: &mut IndexedReader<noodles::fasta::io::BufReader<File>>,
+            window_size: u64,
+            chunk_size: usize,
+        ) -> Result<()>
+        {
+            for (chr, segments) in input {
+                for (i, chunk) in segments.into_iter().chunks(chunk_size).into_iter().enumerate() {
+                    let (names, seq): (Vec<_>, Vec<_>) = chunk
+                        .map(|segment| {
+                            let mut s = get_seq(fasta_reader, &segment)
+                                .unwrap()
+                                .sequence()
+                                .as_ref()
+                                .to_vec();
+                            let l = segment.len() as u64;
+                            if l < window_size {
+                                s.resize(window_size as usize, b'N');
+                            } else if l > window_size {
+                                panic!(
+                                    "Segment {} is too long: {} > {}",
+                                    segment.pretty_show(),
+                                    l,
+                                    window_size
+                                );
+                            }
+                            (segment, s)
+                        })
+                        .unzip();
+                    let data = DataChunk::new(location.join(&chr).join(i.to_string()), names)?;
+                    data.save_seqs(seq)?;
+                }
+            }
+            Ok(())
+        }
+
         if window_size % resolution != 0 {
             bail!("Window size must be a multiple of resolution");
         }
+
         if location.exists() {
             bail!("Location already exists: {}", location.display());
         }
         std::fs::create_dir_all(&location)?;
 
         let mut reader = open_fasta(genome_fasta)?;
+
+        // Retrieve chromosome sizes from the FASTA index
         let mut chrom_sizes: BTreeMap<String, u64> = reader
             .index()
             .as_ref()
@@ -147,25 +194,22 @@ impl GenomeDataBuilder {
             chrom_sizes.retain(|chrom, _| chroms.contains(chrom));
         }
 
-        let step_size = step_size.unwrap_or(window_size);
-        for (chr, segments) in get_genome_segments(&chrom_sizes, window_size as u64, step_size) {
-            for (i, chunk) in segments.chunks(chunk_size).into_iter().enumerate() {
-                let (names, seq): (Vec<_>, Vec<_>) = chunk
-                    .map(|segment| {
-                        let mut s = get_seq(&mut reader, &segment)
-                            .unwrap()
-                            .sequence()
-                            .as_ref()
-                            .to_vec();
-                        if (segment.len() as u64) < window_size {
-                            s.resize(window_size as usize, b'N');
-                        }
-                        (segment, s)
-                    })
-                    .unzip();
-                let data = DataChunk::new(location.join(&chr).join(i.to_string()), names)?;
-                data.save_seqs(seq)?;
-            }
+        if let Some(segments) = segments {
+            let mut all_chroms = HashSet::new();
+            let mut segments = segments
+                .into_iter()
+                .map(|s| {
+                    let g = GenomicRange::from_str(&s).map_err(|_| { anyhow::anyhow!("Failed to parse segment '{}'", s)})?;
+                    all_chroms.insert(g.chrom().to_string());
+                    Ok(g)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            segments.sort();
+            write_seqs(&segments.into_iter().chunk_by(|x| x.chrom().to_string()), &location, &mut reader, window_size, chunk_size)?;
+            chrom_sizes.retain(|chrom, _| all_chroms.contains(chrom));
+        } else {
+            let step_size = step_size.unwrap_or(window_size);
+            write_seqs(get_genome_segments(&chrom_sizes, window_size as u64, step_size), &location, &mut reader, window_size, chunk_size)?;
         }
 
         let metadata = json!({
@@ -178,11 +222,13 @@ impl GenomeDataBuilder {
             serde_json::to_string(&metadata)?,
         )?;
 
+        let index = SegmentIndex::new(&location, chrom_sizes.keys());
         Ok(Self {
             chrom_sizes,
             location,
             window_size,
             resolution,
+            index,
         })
     }
 
@@ -193,7 +239,7 @@ impl GenomeDataBuilder {
        
        Parameters
        ----------
-       location
+       location : Path
            The path to the directory containing the genomic data.
        
        Returns
@@ -210,7 +256,7 @@ impl GenomeDataBuilder {
         Self::open_(location)
     }
 
-    /* Returns a vector of chromosome names present in the genomic data.
+    /** Returns a vector of chromosome names present in the genomic data.
     
        Returns
        -------
@@ -221,13 +267,39 @@ impl GenomeDataBuilder {
         self.chrom_sizes.keys().collect()
     }
 
+    /** Returns the keys (track names) in the dataset.
+    
+       This method retrieves all keys from the dataset, which are typically the names of files
+       containing genomic data. The keys are sorted alphabetically.
+       
+       Returns
+       -------
+       list[str]
+           A sorted list of keys as strings.
+    */
+    pub fn keys(&self) -> Result<Vec<String>> {
+        if let Some(chr) = self.chrom_sizes.keys().next() {
+            if let Some(entry) = std::fs::read_dir(self.location.join(&chr))?.next() {
+                let mut result  = std::fs::read_dir(entry?.path().join("data"))?
+                    .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+                    .collect::<Result<Vec<_>>>()?;
+                result.sort();
+                Ok(result)
+            } else {
+                Ok(Vec::new())
+            }
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     /** Adds w5z files to the dataset.
     
        This method processes a batch of files, each associated with a key, and adds them to the genomic data.
        
        Parameters
        ----------
-       files : dict[str, PathBuf]
+       files : dict[str, Path]
            A dictionary mapping keys to file paths.
     */
     #[pyo3(
@@ -258,7 +330,7 @@ impl GenomeDataBuilder {
        ----------
        key : str
            The key associated with the file.
-       w5z : PathBuf
+       w5z : Path
            The path to the W5Z file containing genomic data.
     */
     #[pyo3(
@@ -311,127 +383,6 @@ impl GenomeDataBuilder {
     }
 }
 
-/** A dataloader for genomic data, allowing for efficient retrieval of genomic
-    sequences and their associated values.
-    
-    This object provides an iterator over genomic data chunks, enabling batch
-    retrieval of genomic sequences and their associated values.
-    The iterator yields tuples of sequences and values,
-    where sequences has shape (batch_size, sequence_length), and values has shape
-    (batch_size, sequence_length / resolution, num_tracks).
-
-    Parameters
-    ----------
-    location
-        The path to the genomic data directory.
-    batch_size
-        The number of genomic sequences to retrieve in each batch (default is 8).
-    trim_length
-        Trim both ends of the value vector according to the `trim_length` parameter.
-        As the result, the length of the values will be reduced by `2 * trim_length`.
-        Note this only affects the values, not the sequences. The sequences will always
-        have the full length as defined in the dataset.
-        This is useful when you want to compute the loss on only the central part of the sequence.
-        This is because the edges of the sequence may contain
-        padding or other artifacts that should not be considered in the loss computation.
-    prefetch
-        The number of chunks to prefetch for efficient data loading (default is 1).
-        This allows for asynchronous loading of data, improving performance during training or inference.
-        But it will increase memory usage, so it should be set according to the available resources.
-*/
-#[pyclass]
-pub struct GenomeDataLoader {
-    data: GenomeDataBuilder,
-    batch_size: usize,
-    buffer_seq: VecDeque<Array1<u8>>,
-    buffer_data: VecDeque<ArrayD<f32>>,
-    chunks: PrefetchIterator<(Sequences, Values)>,
-    trim_length: Option<usize>,
-    prefetch: usize,
-}
-
-impl Iterator for GenomeDataLoader {
-    type Item = (Array2<u8>, ArrayD<f32>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let n_buffer = self.buffer_seq.len();
-        if n_buffer < self.batch_size {
-            if let Some((seqs, values)) = self.chunks.next() {
-                self.buffer_seq.extend(seqs.iter_rows());
-                self.buffer_data.extend(values.iter_rows());
-                self.next()
-            } else {
-                if n_buffer == 0 {
-                    None
-                } else {
-                    let r = self.buffer_seq.len();
-                    let c = self.buffer_seq[0].len();
-                    let seqs = self.buffer_seq.drain(..).flatten().collect::<Vec<_>>();
-                    let seqs = Array2::from_shape_vec((r, c), seqs).unwrap();
-                    let mut shape: Vec<_> = self.buffer_data[0].shape().to_vec();
-                    shape.insert(0, r);
-                    let data = self.buffer_data
-                            .drain(..)
-                            .flatten()
-                            .collect::<Vec<_>>();
-                    let data = ArrayD::from_shape_vec(shape, data).unwrap();
-                    Some((seqs, data))
-                }
-            }
-        } else {
-            let c = self.buffer_seq[0].len();
-            let seqs = self.buffer_seq.drain(..self.batch_size)
-                .flatten()
-                .collect::<Vec<_>>();
-            let seqs = Array2::from_shape_vec((self.batch_size, c), seqs).unwrap();
-            let mut shape = self.buffer_data[0].shape().to_vec();
-            shape.insert(0, self.batch_size);
-            let data = self.buffer_data
-                .drain(..self.batch_size)
-                .flatten()
-                .collect::<Vec<_>>();
-            let data = ArrayD::from_shape_vec(shape, data).unwrap();
-            Some((seqs, data))
-        }
-    }
-}
-
-#[pymethods]
-impl GenomeDataLoader {
-    #[new]
-    #[pyo3(
-        signature = (
-            location, *, batch_size=8, trim_length=None, prefetch=1,
-        ),
-        text_signature = "($self, location, *, batch_size=8, trim_length=None, prefetch=1)"
-    )]
-    pub fn new(location: PathBuf, batch_size: usize, trim_length: Option<usize>, prefetch: usize) -> Result<Self> {
-        let data = GenomeDataBuilder::open_(location)?;
-        let chunks = data.iter_chunks(prefetch, trim_length);
-        Ok(Self {
-            data,
-            batch_size,
-            buffer_seq: VecDeque::new(),
-            buffer_data: VecDeque::new(),
-            chunks,
-            trim_length,
-            prefetch,
-        })
-    }
-
-    fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.chunks = slf.data.iter_chunks(slf.prefetch, slf.trim_length);
-        slf.buffer_seq.clear();
-        slf.buffer_data.clear(); 
-        slf
-    }
-
-    fn __next__<'a>(mut slf: PyRefMut<'a, Self>, py: Python<'a>) -> Option<(Bound<'a, PyArray2<u8>>, Bound<'a, PyArrayDyn<f32>>)> {
-        let (seq, values) = slf.next()?;
-        Some((PyArray2::from_owned_array(py, seq), PyArrayDyn::from_owned_array(py, values)))
-    }
-}
-
 /** Represents an iterator over genomic data chunks, allowing for efficient traversal of genomic datasets.
  
     This struct is used to iterate over genomic data chunks, providing access to each chunk's segments
@@ -441,8 +392,8 @@ struct DataChunkIter {
     root: PathBuf,
     chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
     chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
-    keys: Option<Vec<String>>,
-    trim_length: Option<usize>,
+    keys: Vec<String>,
+    trim_target: Option<usize>,
 }
 
 impl Iterator for DataChunkIter {
@@ -451,15 +402,11 @@ impl Iterator for DataChunkIter {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(path) = self.chunks.next() {
             let mut chunk = DataChunk::open(path).unwrap();
-            if let Some(trim_length) = self.trim_length {
-                chunk.set_trim_length(trim_length);
-            }
-
-            if self.keys.is_none() {
-                self.keys = Some(chunk.keys().unwrap());
+            if let Some(trim_target) = self.trim_target {
+                chunk.set_trim_target(trim_target);
             }
             let seqs = chunk.get_seqs().unwrap();
-            let values = chunk.gets(&chunk.keys().unwrap()).unwrap();
+            let values = chunk.gets(&self.keys).unwrap();
             Some((seqs, values))
         } else {
             let chr = self.chroms.next()?;
@@ -474,10 +421,10 @@ impl Iterator for DataChunkIter {
 }
 
 #[derive(Decode, Encode)]
-struct Values(#[bincode(with_serde)] ArrayD<bf16>);
+pub struct Values(#[bincode(with_serde)] pub ArrayD<bf16>);
 
 impl Values {
-    fn iter_rows(&self) -> impl DoubleEndedIterator<Item = ArrayD<f32>> + '_ {
+    pub(super) fn iter_rows(&self) -> impl DoubleEndedIterator<Item = ArrayD<f32>> + '_ {
         self.0
             .axis_iter(Axis(0))
             .map(|row| row.mapv(|x| x.to_f32()))
@@ -485,10 +432,10 @@ impl Values {
 }
 
 #[derive(Decode, Encode)]
-struct Sequences(#[bincode(with_serde)] Array2<u8>);
+pub struct Sequences(#[bincode(with_serde)] pub Array2<u8>);
 
 impl Sequences {
-    fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
+    pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
         self.0.axis_iter(Axis(0)).map(|row| row.to_owned())
     }
 }
@@ -500,10 +447,11 @@ impl Sequences {
     retrieving data by keys, and iterating over the keys.
 */
 #[pyclass]
+#[derive(Clone, Debug)]
 pub struct DataChunk {
     location: PathBuf,
-    segments: Vec<GenomicRange>,
-    trim_length: Option<usize>,
+    pub(crate) segments: Vec<GenomicRange>,
+    trim_target: Option<usize>,
 }
 
 impl DataChunk {
@@ -515,11 +463,11 @@ impl DataChunk {
         Ok(Self {
             location: location.as_ref().to_path_buf(),
             segments,
-            trim_length: None,
+            trim_target: None,
         })
     }
 
-    fn open(location: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(location: impl AsRef<Path>) -> Result<Self> {
         let location = location.as_ref().to_path_buf();
         if !location.exists() {
             return Err(anyhow::anyhow!(
@@ -531,24 +479,18 @@ impl DataChunk {
             .lines()
             .map(|line| GenomicRange::from_str(line).unwrap())
             .collect();
-        Ok(Self { location, segments, trim_length: None })
+        Ok(Self { location, segments, trim_target: None })
     }
 
-    fn set_trim_length(&mut self, trim_length: usize) {
-        self.trim_length = Some(trim_length);
+    fn set_trim_target(&mut self, trim_target: usize) {
+        self.trim_target = Some(trim_target);
     }
 
     pub fn len(&self) -> usize {
         self.segments.len()
     }
 
-    fn keys(&self) -> Result<Vec<String>> {
-        std::fs::read_dir(self.location.join("data"))?
-            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-            .collect()
-    }
-
-    fn get_seqs(&self) -> Result<Sequences> {
+    pub fn get_seqs(&self) -> Result<Sequences> {
         let seq_file = self.location.join("sequence.dat");
         let seqs = std::fs::read(seq_file)?;
         let mut seqs = zstd::stream::Decoder::new(std::io::Cursor::new(seqs))?;
@@ -559,7 +501,18 @@ impl DataChunk {
         Ok(seqs)
     }
 
-    fn get(&self, key: &str) -> Result<Option<Values>> {
+    pub fn get_seq_at(&self, i: usize) -> Result<Array1<u8>> {
+        if i >= self.segments.len() {
+            bail!("Index out of bounds: {} >= {}", i, self.segments.len());
+        }
+        let seqs = self.get_seqs()?;
+        let seq = seqs.iter_rows().nth(i).ok_or_else(|| {
+            anyhow::anyhow!("Failed to get sequence at index {}", i)
+        })?;
+        Ok(seq)
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<Values>> {
         let path = self.location.join("data").join(key);
         if !path.exists() {
             return Ok(None);
@@ -570,16 +523,16 @@ impl DataChunk {
             &mut data,
             Configuration::default(),
         )?;
-        if let Some(trim_length) = self.trim_length {
+        if let Some(trim_target) = self.trim_target {
             let size = data.0.shape()[1];
-            let data = data.0.slice(s![.., trim_length..size - trim_length]);
+            let data = data.0.slice(s![.., trim_target..size - trim_target]);
             Ok(Some(Values(data.into_dyn().to_owned())))
         } else {
             Ok(Some(data))
         }
     }
 
-    fn gets(&self, keys: &[String]) -> Result<Values> {
+    pub fn gets(&self, keys: &[String]) -> Result<Values> {
         let values = keys.par_iter()
             .map(|key| {
                 let data = self.get(key)?.with_context(|| {

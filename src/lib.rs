@@ -1,7 +1,7 @@
 mod bam;
 mod bigwig;
 mod w5z;
-mod data;
+mod dataloader;
 mod utils;
 
 use pyo3::prelude::*;
@@ -14,8 +14,8 @@ fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     m.add_class::<w5z::W5Z>()?;
-    m.add_class::<data::GenomeDataBuilder>()?;
-    m.add_class::<data::GenomeDataLoader>()?;
+    m.add_class::<dataloader::GenomeDataBuilder>()?;
+    m.add_class::<dataloader::GenomeDataLoader>()?;
 
     m.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, m)?)?;
 
