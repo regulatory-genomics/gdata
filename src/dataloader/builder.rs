@@ -636,14 +636,14 @@ impl DataChunk {
             .collect();
         let seqs = Sequences(Array2::from_shape_vec(shape, seqs?)?);
         let seqs = bincode::encode_to_vec::<_, Configuration>(seqs, Default::default())?;
-        let seqs = zstd::bulk::Compressor::new(7)?.compress(&seqs)?;
+        let seqs = zstd::bulk::Compressor::new(9)?.compress(&seqs)?;
         std::fs::write(self.location.join("sequence.dat"), seqs)?;
         Ok(())
     }
 
     fn save_data(&self, key: &str, data: &Values) -> Result<()> {
         let data = bincode::encode_to_vec::<_, Configuration>(data, Configuration::default())?;
-        let data = zstd::bulk::Compressor::new(7)?.compress(&data)?;
+        let data = zstd::bulk::Compressor::new(9)?.compress(&data)?;
         std::fs::write(self.location.join("data").join(key), data)?;
         Ok(())
     }
