@@ -37,7 +37,9 @@ use crate::utils::PrefetchIterator;
     genome_fasta
         The path to the FASTA file containing the genome sequences.
     segments
-        Optional list of genomic segments to include in the dataset. If None, the entire genome will be used.
+        Optional list of genomic segments to include in the dataset.
+        The genomic segments should be provided as strings in the format "chrom:start-end".
+        If None, the entire genome will be used.
     window_size
         The size of the genomic windows to be processed (default is 524288).
     step_size
@@ -199,8 +201,9 @@ impl GenomeDataBuilder {
             let mut segments = segments
                 .into_iter()
                 .map(|s| {
-                    let g = GenomicRange::from_str(&s).map_err(|_| { anyhow::anyhow!("Failed to parse segment '{}'", s)})?;
+                    let mut g = GenomicRange::from_str(&s).map_err(|_| { anyhow::anyhow!("Failed to parse segment '{}'", s)})?;
                     all_chroms.insert(g.chrom().to_string());
+                    expand_segment(&mut g, window_size, &chrom_sizes);
                     Ok(g)
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -621,6 +624,17 @@ impl DataChunk {
     }
 }
 */
+
+fn expand_segment(segment: &mut GenomicRange, window_size: u64, chrom_sizes: &BTreeMap<String, u64>) {
+    if segment.len() < window_size {
+        let start = segment.start().saturating_sub((window_size - segment.len()) / 2);
+        let end = start + window_size;
+        segment.set_start(start);
+        segment.set_end(end);
+    }
+    let size = chrom_sizes.get(segment.chrom()).unwrap();
+    segment.set_end(segment.end().min(*size));
+}
 
 /// Return the segments of the genome as an iterator.
 fn get_genome_segments(
