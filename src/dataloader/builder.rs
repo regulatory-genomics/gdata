@@ -57,7 +57,7 @@ use crate::w5z::W5Z;
 pub struct GenomeDataBuilder {
     chrom_sizes: BTreeMap<String, u64>,
     window_size: u64,
-    resolution: u64,
+    pub(crate) resolution: u64,
     location: PathBuf,
     pub(crate) index: SegmentIndex,
 }

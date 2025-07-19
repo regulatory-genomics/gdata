@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use half::bf16;
 use ndarray::{Array1, Array2, ArrayD};
 use numpy::{PyArray1, PyArray2, PyArrayDyn};
-use pyo3::prelude::*;
+use pyo3::ffi::c_str;
+use pyo3::{prelude::*, py_run};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +48,21 @@ use crate::utils::PrefetchIterator;
         The number of chunks to prefetch for efficient data loading (default is 1).
         This allows for asynchronous loading of data, improving performance during training or inference.
         But it will increase memory usage, so it should be set according to the available resources.
+    
+    See Also
+    --------
+    GenomeDataBuilder :class:`~gdata.GenomeDataBuilder`
+    
+    Examples
+    --------
+    >>> from gdata import as GenomeDataLoader
+    >>> loader = GenomeDataLoader("test_genome", trim_target=40_960)
+    >>> region = 'chr11:35041782-35238390'
+    >>> tracks = ['DNase:CD14-positive monocyte', 'DNase:keratinocyte', 'ChIP-H3K27ac:keratinocyte']
+    >>> loader.plot(region, tracks, savefig="signal.png")
+
+    .. image:: /_static/images/genome_signal.png
+        :align: center
 */
 #[pyclass]
 pub struct GenomeDataLoader(Arc<_DataLoader>);
@@ -104,6 +120,11 @@ impl GenomeDataLoader {
     }
 
     #[getter]
+    fn resolution(&self) -> u64 {
+        self.0.data.resolution
+    }
+
+    #[getter]
     fn batch_size(&self) -> usize {
         self.0.batch_size
     }
@@ -116,6 +137,72 @@ impl GenomeDataLoader {
     #[getter]
     fn data(&self) -> _DataIndexer {
         _DataIndexer(self.0.clone())
+    }
+
+    /** Plots the genomic signal for a specified region and tracks.
+
+        This method generates a plot of the genomic signal for the specified region and tracks.
+        If `savefig` is provided, it saves the plot to the specified file; otherwise, it displays the plot.
+
+        Parameters
+        ----------
+        region : str
+            The genomic region to plot, in the format 'chr:start-end'.
+        tracks : list[str]
+            A list of track names to plot.
+        savefig : Optional[PathBuf]
+            If provided, saves the plot to this file instead of displaying it.
+
+        Returns
+        -------
+        None
+    */
+    #[pyo3(
+        signature = (
+            region, tracks, *, savefig=None,
+        ),
+        text_signature = "($self, region, tracks, *, savefig=None)"
+    )]
+    fn plot(&self, py: Python<'_>, region: &str, tracks: Bound<'_, PyAny>, savefig: Option<PathBuf>) -> Result<()> {
+        let data_indexer = self.data();
+        let key = (region, &tracks).into_pyobject(py)?.into_any();
+        let signal_values = data_indexer.__getitem__(py, key)?;
+        let track_names = extract_string_list(tracks)?;
+        let highlight_start = self.0.trim_target.map(|d| d as u64 / self.0.data.resolution);
+
+        let py_code = r#"
+from matplotlib import pyplot as plt
+height_per_track = 1.5
+width = 8
+
+signal_values = signal_values.T
+n_tracks, n_points = signal_values.shape
+fig, axes = plt.subplots(n_tracks, 1, figsize=[width, n_tracks * height_per_track], sharex=True)
+
+if n_tracks == 1:
+    axes = [axes]
+
+for i, (ax, signal) in enumerate(zip(axes, signal_values)):
+    ax.fill_between(range(n_points), 0, signal, color='black')
+    if highlight_start is not None:
+        ax.axvspan(highlight_start, n_points-highlight_start, color='red', alpha=0.2)
+    #ax.set_ylabel('signal', rotation=0, labelpad=20, va='center', ha='right')
+    ax.set_title(track_names[i], fontsize=7)
+    ax.spines[['top', 'right']].set_visible(False)
+
+axes[-1].set_xticks([0, n_points - 1])
+axes[-1].set_xticklabels(["start", "end"])
+axes[-1].set_xlabel(region)
+
+plt.tight_layout()
+if savefig is None:
+    plt.show()
+else:
+    plt.savefig(savefig, dpi=300, bbox_inches='tight')
+"#;
+        py_run!(py, region track_names signal_values highlight_start savefig, py_code);
+
+        Ok(())
     }
 
     fn __len__(&self) -> usize {
@@ -278,7 +365,7 @@ impl _DataIndexer {
         &'a self,
         py: Python<'a>,
         key: Bound<'a, PyAny>,
-    ) -> Result<Bound<'a, PyAny>> {
+    ) -> Result<Bound<'a, PyArrayDyn<f32>>> {
         let (i, j): (String, Bound<'_, PyAny>) = key.extract()?;
         let j = if let Ok(j_) = j.extract::<String>() {
             vec![j_]
@@ -287,7 +374,7 @@ impl _DataIndexer {
         };
 
         let data = self.get(&i, &j)?.mapv(|x| x.to_f32());
-        Ok(PyArrayDyn::from_owned_array(py, data).into_any())
+        Ok(PyArrayDyn::from_owned_array(py, data))
     }
 }
 
@@ -321,5 +408,14 @@ impl _DataLoader {
             tag,
             seq_as_string,
         })
+    }
+}
+
+fn extract_string_list(str: Bound<'_, PyAny>) -> Result<Vec<String>> {
+    if let Ok(s) = str.extract::<String>() {
+        Ok(vec![s])
+    } else {
+        str.extract::<Vec<String>>()
+            .with_context(|| "Failed to extract string list from PyAny")
     }
 }
