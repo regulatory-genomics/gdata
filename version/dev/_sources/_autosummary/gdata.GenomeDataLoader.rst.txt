@@ -1,0 +1,33 @@
+﻿gdata.GenomeDataLoader
+======================
+
+.. currentmodule:: gdata
+
+.. autoclass:: GenomeDataLoader
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~GenomeDataLoader.batch_size
+      ~GenomeDataLoader.data
+      ~GenomeDataLoader.resolution
+      ~GenomeDataLoader.seq
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~GenomeDataLoader.keys
+      ~GenomeDataLoader.plot
+      ~GenomeDataLoader.segments
+   
+   
