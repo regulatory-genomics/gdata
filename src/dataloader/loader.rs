@@ -1,4 +1,3 @@
-
 use anyhow::{Context, Result};
 use half::bf16;
 use ndarray::{Array1, Array2, ArrayD};
@@ -8,8 +7,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::dataloader::builder::{decode_nucleotide, GenomeDataBuilder, Sequences, Values};
 use crate::utils::PrefetchIterator;
-use crate::dataloader::builder::{GenomeDataBuilder, Sequences, Values};
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -30,6 +29,7 @@ use crate::dataloader::builder::{GenomeDataBuilder, Sequences, Values};
     trim_target: Optional[int]
         Trim both ends of the target vector according to the `trim_target` parameter.
         As a result, the length of the values will be reduced by `2 * trim_target`.
+        The unit of `trim_target` is base pairs, and it must be a multiple of the resolution.
         Note this only affects the values, not the sequences. The sequences will always
         have the full length as defined in the dataset.
         This is useful when you want to compute the loss on only the central part of the sequence.
@@ -39,6 +39,10 @@ use crate::dataloader::builder::{GenomeDataBuilder, Sequences, Values};
         An optional tag to identify the dataset. If provided, the data loader will
         include this tag in each data batch, which can be useful for distinguishing
         between different datasets or experiments.
+    seq_as_string : bool
+        If True, sequences will be returned as strings instead of numpy integer arrays.
+        This is useful for cases where you want to work with the sequences as text,
+        such as for visualization or text-based analysis.
     prefetch : int
         The number of chunks to prefetch for efficient data loading (default is 1).
         This allows for asynchronous loading of data, improving performance during training or inference.
@@ -52,18 +56,26 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8, trim_target=None, tag=None, prefetch=1,
+            location, *, batch_size=8, trim_target=None, tag=None, seq_as_string=false, prefetch=1,
         ),
-        text_signature = "($self, location, *, batch_size=8, trim_target=None, tag=None, prefetch=1)"
+        text_signature = "($self, location, *, batch_size=8, trim_target=None, tag=None, seq_as_string=False, prefetch=1)"
     )]
     pub fn new(
         location: PathBuf,
         batch_size: usize,
         trim_target: Option<usize>,
         tag: Option<String>,
+        seq_as_string: bool,
         prefetch: usize,
     ) -> Result<Self> {
-        Ok(Self(Arc::new(_DataLoader::new(location, batch_size, trim_target, tag, prefetch)?)))
+        Ok(Self(Arc::new(_DataLoader::new(
+            location,
+            batch_size,
+            trim_target,
+            tag,
+            seq_as_string,
+            prefetch,
+        )?)))
     }
 
     /** Returns the keys (track names) in the dataset.
@@ -117,6 +129,7 @@ impl GenomeDataLoader {
             buffer_seq: VecDeque::new(),
             buffer_data: VecDeque::new(),
             chunks: slf.0.data.iter_chunks(slf.0.prefetch, slf.0.trim_target),
+            seq_as_string: slf.0.seq_as_string,
         }
     }
 }
@@ -127,6 +140,7 @@ pub struct _DataLoaderIter {
     buffer_seq: VecDeque<Array1<u8>>,
     buffer_data: VecDeque<ArrayD<f32>>,
     chunks: PrefetchIterator<(Sequences, Values)>,
+    seq_as_string: bool,
 }
 
 impl Iterator for _DataLoaderIter {
@@ -182,8 +196,22 @@ impl _DataLoaderIter {
         py: Python<'a>,
     ) -> Option<Bound<'a, pyo3::types::PyTuple>> {
         let (seq, values) = slf.next()?;
-        let seq = PyArray2::from_owned_array(py, seq);
+
         let values = PyArrayDyn::from_owned_array(py, values);
+        let seq = if slf.seq_as_string {
+            seq.rows()
+                .into_iter()
+                .map(|row| {
+                    let row: Vec<_> = row.iter().map(|x| decode_nucleotide(*x).unwrap()).collect();
+                    String::from_utf8(row).unwrap()
+                })
+                .collect::<Vec<_>>()
+                .into_pyobject(py)
+                .unwrap()
+        } else {
+            PyArray2::from_owned_array(py, seq).into_any()
+        };
+
         if let Some(tag) = &slf.loader.tag {
             Some((&tag, seq, values).into_pyobject(py).unwrap())
         } else {
@@ -197,7 +225,11 @@ pub struct _SeqIndexer(Arc<_DataLoader>);
 
 impl _SeqIndexer {
     fn get(&self, key: &str) -> Result<Array1<u8>> {
-        let (chunk, i) = self.0.data.index.get_datachunk(key)
+        let (chunk, i) = self
+            .0
+            .data
+            .index
+            .get_datachunk(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
         Ok(chunk.get_seq_at(i)?)
     }
@@ -224,10 +256,19 @@ pub struct _DataIndexer(Arc<_DataLoader>);
 
 impl _DataIndexer {
     fn get(&self, key: &str, j: &[String]) -> Result<ArrayD<bf16>> {
-        let (chunk, i) = self.0.data.index.get_datachunk(key)
+        let (chunk, i) = self
+            .0
+            .data
+            .index
+            .get_datachunk(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
         let vals = chunk.gets(j)?;
-        Ok(vals.0.axis_iter(ndarray::Axis(0)).nth(i).unwrap().to_owned())
+        Ok(vals
+            .0
+            .axis_iter(ndarray::Axis(0))
+            .nth(i)
+            .unwrap()
+            .to_owned())
     }
 }
 
@@ -244,7 +285,7 @@ impl _DataIndexer {
         } else {
             j.extract::<Vec<String>>()?
         };
-            
+
         let data = self.get(&i, &j)?.mapv(|x| x.to_f32());
         Ok(PyArrayDyn::from_owned_array(py, data).into_any())
     }
@@ -255,8 +296,9 @@ struct _DataLoader {
     keys: Vec<String>,
     batch_size: usize,
     trim_target: Option<usize>,
-    prefetch: usize,
     tag: Option<String>,
+    seq_as_string: bool,
+    prefetch: usize,
 }
 
 impl _DataLoader {
@@ -265,9 +307,10 @@ impl _DataLoader {
         batch_size: usize,
         trim_target: Option<usize>,
         tag: Option<String>,
+        seq_as_string: bool,
         prefetch: usize,
     ) -> Result<Self> {
-        let data = GenomeDataBuilder::open_(location)?;
+        let data = GenomeDataBuilder::open(location)?;
         let keys = data.keys()?;
         Ok(Self {
             data,
@@ -276,6 +319,7 @@ impl _DataLoader {
             trim_target,
             prefetch,
             tag,
+            seq_as_string,
         })
     }
 }
