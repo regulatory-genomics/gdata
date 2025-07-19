@@ -51,7 +51,7 @@ use crate::utils::PrefetchIterator;
     
     See Also
     --------
-    GenomeDataBuilder :class:`~gdata.GenomeDataBuilder`
+    GenomeDataBuilder
     
     Examples
     --------

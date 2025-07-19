@@ -52,6 +52,18 @@ use crate::w5z::W5Z;
         A list of chromosomes to include in the dataset. If None, all chromosomes in the FASTA file will be used.
     overwrite
         If True, existing data at the specified location will be overwritten (default is False).
+
+    See Also
+    --------
+    GenomeDataLoader
+    
+    Examples
+    --------
+    >>> from gdata import as GenomeDataBuilder
+    >>> regions = ["chr11:35041782-35238390", "chr11:35200000-35300000"]
+    >>> tracks = {'DNase:CD14-positive monocyte': 'ENCSR464ETX.w5z', 'DNase:keratinocyte': 'ENCSR000EPQ.w5z'}
+    >>> builder = GenomeDataBuilder("genome", 'genome.fa.gz', segments=regions, window_size=196_608, resolution=128)
+    >>> builder.add_files(tracks)
 */
 #[pyclass]
 pub struct GenomeDataBuilder {

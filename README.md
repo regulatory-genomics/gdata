@@ -10,4 +10,4 @@ pip install 'git+https://github.com/regulatory-genomics/gdata.git#egg=gdata'
 pip install 'git+https://github.com/regulatory-genomics/gdata.git#egg=gdata'[torch]
 ```
 
-(**Documentation**)[https://lab.kaizhang.org/gdata/version/dev/index.html]
+[**Documentation**](https://lab.kaizhang.org/gdata/version/dev/index.html)
