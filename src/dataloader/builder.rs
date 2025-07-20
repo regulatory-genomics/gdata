@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use bed_utils::bed::{BEDLike, GenomicRange};
 use half::bf16;
+use indexmap::IndexMap;
 use itertools::Itertools;
 use ndarray::Array2;
 use noodles::core::Position;
@@ -10,18 +11,18 @@ use noodles::fasta::{
 };
 use pyo3::prelude::*;
 use pyo3::types::PyType;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
+use crate::dataloader::chunk::{DataChunk, DataChunkIter, Sequences, Values};
 use crate::dataloader::index::{make_seq_index, ChunkIndex};
 use crate::utils::PrefetchIterator;
 use crate::w5z::W5Z;
-use crate::dataloader::chunk::{DataChunkIter, DataChunk, Sequences, Values};
 
 /** Represents a builder for genomic data, allowing for the creation and management of genomic datasets.
 
@@ -35,17 +36,15 @@ use crate::dataloader::chunk::{DataChunkIter, DataChunk, Sequences, Values};
     ├── metadata.json
     ├── chr1/
     │   ├── 0/
-    │   │   ├── data/
-    │   │   │   ├── chunk1
-    │   │   │   └── chunk2
-    │   │   |── sequence.dat
+    │   │   ├── data
+    |   |   ├── data.index
+    │   │   ├── sequence.dat
     |   |   └── names.txt
     │   |── 1/
-    │   │   ├── data/
-    │   │   │   ├── chunk1 
-    │   │   │   └── chunk2
+    │   │   ├── data
+    |   |   ├── data.index
     │   │   ├── sequence.dat
-    │   │   └── names.txt
+    |   |   └── names.txt
 
     Parameters
     ----------
@@ -73,7 +72,7 @@ use crate::dataloader::chunk::{DataChunkIter, DataChunk, Sequences, Values};
     See Also
     --------
     GenomeDataLoader
-    
+
     Examples
     --------
     >>> from gdata import as GenomeDataBuilder
@@ -128,10 +127,7 @@ impl GenomeDataBuilder {
         })
     }
 
-    fn iter_chunks(
-        &self,
-        trim_target: Option<usize>,
-    ) -> impl Iterator<Item = DataChunk> {
+    fn iter_chunks(&self, trim_target: Option<usize>) -> impl Iterator<Item = DataChunk> {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -165,8 +161,9 @@ impl GenomeDataBuilder {
         buffer_size: usize,
         trim_target: Option<usize>,
     ) -> PrefetchIterator<(Sequences, Values)> {
-        let iter = self.iter_chunks(trim_target)
-            .map(|chunk| (chunk.get_seqs().unwrap(), chunk.read_all().unwrap()));
+        let iter = self
+            .iter_chunks(trim_target)
+            .map(|mut chunk| (chunk.get_seqs().unwrap(), chunk.read_all().unwrap()));
         PrefetchIterator::new(iter, buffer_size)
     }
 }
@@ -362,7 +359,7 @@ impl GenomeDataBuilder {
         if let Some(chr) = self.chrom_sizes.keys().next() {
             if let Some(entry) = std::fs::read_dir(self.location.join(&chr))?.next() {
                 let chunk = DataChunk::open(entry?.path())?;
-                chunk.keys()
+                Ok(chunk.keys())
             } else {
                 Ok(Vec::new())
             }
@@ -395,17 +392,66 @@ impl GenomeDataBuilder {
         signature = (files),
         text_signature = "($self, files)",
     )]
-    fn add_files(&self, py: Python<'_>, files: HashMap<String, PathBuf>) -> Result<()> {
+    fn add_files(&self, py: Python<'_>, files: IndexMap<String, PathBuf>) -> Result<()> {
+        let n_cols = self.window_size / self.resolution;
         files
             .into_iter()
             .chunks(64)
             .into_iter()
             .try_for_each(|chunk| {
+                let w5z = chunk
+                    .map(|(key, path)| (key, W5Z::open(path).unwrap()))
+                    .collect::<Vec<_>>();
                 py.check_signals()?;
-                chunk
-                    .collect::<Vec<_>>()
-                    .into_par_iter()
-                    .try_for_each(|(key, w5z)| self.add_file(&key, w5z))
+                self.iter_chunks(None)
+                    .chunk_by(|x| x.segments[0].chrom().to_string())
+                    .into_iter()
+                    .for_each(|(chrom, group)| {
+                        let values: Vec<_> = w5z
+                            .par_iter()
+                            .map(|(k, x)| (k, x.get(&chrom).unwrap().to_vec()))
+                            .collect();
+                        group.into_iter().for_each(|mut dc| {
+                            let segments = dc.segments.clone();
+                            let data = values.par_iter().map(|(key, values)| {
+                                let arr_elems: Vec<_> = segments
+                                    .iter()
+                                    .flat_map(|segment| {
+                                        let start = segment.start() as usize;
+                                        let end = segment.end() as usize;
+                                        let mut v: Vec<_> = if self.resolution > 1 {
+                                            values[start..end]
+                                                .chunks(self.resolution as usize)
+                                                .map(|x| {
+                                                    let m: average::Mean =
+                                                        x.iter().map(|x| *x as f64).collect();
+                                                    bf16::from_f64(m.mean())
+                                                })
+                                                .collect()
+                                        } else {
+                                            values[start..end]
+                                                .iter()
+                                                .map(|x| bf16::from_f32(*x))
+                                                .collect()
+                                        };
+                                        if v.len() < n_cols as usize {
+                                            v.resize(n_cols as usize, bf16::from_f32(0.0));
+                                        }
+                                        v
+                                    })
+                                    .collect();
+                                let arr = Array2::from_shape_vec(
+                                    (segments.len(), n_cols as usize),
+                                    arr_elems,
+                                )
+                                .unwrap()
+                                .into_dyn();
+                                (key.to_string(), Values(arr))
+                            });
+                            dc.save_data(data).unwrap();
+                        });
+                    });
+                Ok(())
             })
     }
 
@@ -427,56 +473,8 @@ impl GenomeDataBuilder {
         signature = (key, w5z),
         text_signature = "($self, key, w5z)",
     )]
-    fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
-        let n_cols = self.window_size / self.resolution;
-        let w5z = W5Z::open(w5z)?;
-        for chr in self.chroms() {
-            let chunks: Vec<_> = std::fs::read_dir(self.location.join(&chr))?
-                .filter_map(Result::ok)
-                .collect();
-            let values = w5z.get(&chr)?.to_vec();
-            for c in chunks {
-                let data = DataChunk::open(c.path())?;
-                let arr_elems: Vec<_> = data
-                    .segments
-                    .iter()
-                    .flat_map(|segment| {
-                        let start = segment.start() as usize;
-                        let end = segment.end() as usize;
-                        let mut v: Vec<_> = if self.resolution > 1 {
-                            values[start..end]
-                                .chunks(self.resolution as usize)
-                                .map(|x| {
-                                    let m: average::Mean = x.iter().map(|x| *x as f64).collect();
-                                    bf16::from_f64(m.mean())
-                                })
-                                .collect()
-                        } else {
-                            values[start..end]
-                                .iter()
-                                .map(|x| bf16::from_f32(*x))
-                                .collect()
-                        };
-                        if v.len() < n_cols as usize {
-                            v.resize(n_cols as usize, bf16::from_f32(0.0));
-                        }
-                        v
-                    })
-                    .collect();
-                let arr =
-                    Array2::from_shape_vec((data.segments.len(), n_cols as usize), arr_elems)?
-                        .into_dyn();
-                data.save_data(key, &Values(arr))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(&self) -> Result<()> {
-        self.iter_chunks(None).try_for_each(|mut chunk| {
-            chunk.consolidate()
-        })?;
-        Ok(())
+    fn add_file(&self, py: Python<'_>, key: &str, w5z: PathBuf) -> Result<()> {
+        self.add_files(py, IndexMap::from([(key.to_string(), w5z)]))
     }
 }
 

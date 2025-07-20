@@ -37,4 +37,4 @@ rayon = "1.10"
 
 [dependencies.pyo3]
 version = "0.25"
-features = ["extension-module", "anyhow"]
+features = ["extension-module", "anyhow", "indexmap"]

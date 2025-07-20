@@ -87,6 +87,12 @@ impl Values {
         let values = values.iter().map(|arr| arr.0.view()).collect::<Vec<_>>();
         Ok(Values(ndarray::stack(Axis(2), &values)?))
     }
+
+    fn encode(self) -> Result<Vec<u8>> {
+        let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
+        let data = zstd::bulk::Compressor::new(9)?.compress(&data)?;
+        Ok(data)
+    }
 }
 
 #[derive(Decode, Encode)]
@@ -119,20 +125,19 @@ pub struct DataChunk {
     location: PathBuf,
     pub(crate) segments: Vec<GenomicRange>,
     trim_target: Option<usize>,
-    data_store: Option<DataStore>,
+    data_store: DataStore,
 }
 
 impl DataChunk {
     pub fn new(location: impl AsRef<Path>, segments: Vec<GenomicRange>) -> Result<Self> {
-        std::fs::create_dir_all(location.as_ref().join("data"))?;
-
+        std::fs::create_dir_all(location.as_ref())?;
         let names = segments.iter().map(|x| x.pretty_show()).join("\n");
         std::fs::write(location.as_ref().join("names.txt"), names)?;
         Ok(Self {
             location: location.as_ref().to_path_buf(),
             segments,
             trim_target: None,
-            data_store: None,
+            data_store: DataStore::create(location.as_ref().join("data"), std::iter::empty::<(_, String)>())?,
         })
     }
 
@@ -148,17 +153,12 @@ impl DataChunk {
             .lines()
             .map(|line| GenomicRange::from_str(line).unwrap())
             .collect();
-        let store_path = location.join("_data");
-        let data_store = if store_path.exists() {
-            Some(DataStore::open(store_path)?)
-        } else {
-            None
-        };
+        let store_path = location.join("data");
         Ok(Self {
             location,
             segments,
             trim_target: None,
-            data_store,
+            data_store: DataStore::open(store_path)?,
         })
     }
 
@@ -170,20 +170,8 @@ impl DataChunk {
         self.segments.len()
     }
 
-    pub fn keys(&self) -> Result<Vec<String>> {
-        if let Some(data_store) = &self.data_store {
-            Ok(data_store.index.keys().cloned().collect())
-        } else {
-            let data_dir = self.location.join("data");
-            let mut result = std::fs::read_dir(data_dir)?
-                .map(|entry| {
-                    let entry = entry?;
-                    Ok(entry.file_name().into_string().unwrap())
-                })
-                .collect::<Result<Vec<_>>>()?;
-            result.sort();
-            Ok(result)
-        }
+    pub fn keys(&self) -> Vec<String> {
+        self.data_store.index.keys().cloned().collect()
     }
 
     pub fn get_seqs(&self) -> Result<Sequences> {
@@ -204,16 +192,8 @@ impl DataChunk {
         Ok(seq)
     }
 
-    fn data_store(&self) -> Result<&DataStore> {
-        self.data_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Data store not initialized. Please call `finish()` to create the data store."
-            )
-        })
-    }
-
-    pub fn get(&self, key: &str) -> Result<Option<Values>> {
-        let data = self.data_store()?.read(key)?;
+    pub fn get(&mut self, key: &str) -> Result<Option<Values>> {
+        let data = self.data_store.read(key)?;
         if let Some(trim_target) = self.trim_target {
             Ok(data.map(|x| x.trim(trim_target)))
         } else {
@@ -221,12 +201,12 @@ impl DataChunk {
         }
     }
 
-    pub fn gets(&self, keys: &[String]) -> Result<Values> {
-        self.data_store()?.read_many(keys, self.trim_target)
+    pub fn gets(&mut self, keys: &[String]) -> Result<Values> {
+        self.data_store.read_many(keys, self.trim_target)
     }
 
-    pub fn read_all(&self) -> Result<Values> {
-        self.data_store()?.read_all(self.trim_target)
+    pub fn read_all(&mut self) -> Result<Values> {
+        self.data_store.read_all(self.trim_target)
     }
 
     pub fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
@@ -243,33 +223,16 @@ impl DataChunk {
         Ok(())
     }
 
-    pub fn save_data(&self, key: &str, data: &Values) -> Result<()> {
-        let data = bincode::encode_to_vec::<_, Configuration>(data, Configuration::default())?;
-        let data = zstd::bulk::Compressor::new(9)?.compress(&data)?;
-        std::fs::write(self.location.join("data").join(key), data)?;
-        Ok(())
-    }
-
-    /// Consolidates the data chunk by merging data files into a single file.
-    pub fn consolidate(&mut self) -> Result<()> {
-        let mut data_files = std::fs::read_dir(self.location.join("data"))?
-            .map(|entry| {
-                let entry = entry?;
-                Ok((entry.file_name().into_string().unwrap(), entry.path()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        data_files.sort_by(|a, b| a.0.cmp(&b.0));
-        let data_store = DataStore::create(self.location.join("_data"), data_files)?;
-        self.data_store = Some(data_store);
-        std::fs::remove_dir_all(self.location.join("data"))?;
-        Ok(())
+    pub fn save_data(&mut self, data: impl IntoParallelIterator<Item = (String, Values)>) -> Result<()> {
+        self.data_store.write_par(data)
     }
 }
 
 #[derive(Debug)]
 struct DataStore {
     index: IndexMap<String, (usize, usize)>,
-    file: PathBuf,
+    file: std::fs::File,
+    location: PathBuf,
 }
 
 impl DataStore {
@@ -277,7 +240,15 @@ impl DataStore {
         location: impl AsRef<Path>,
         data: impl IntoIterator<Item = (String, impl AsRef<Path>)>,
     ) -> Result<Self> {
-        let mut file = std::fs::File::create(&location)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&location).with_context(|| {
+                format!("Failed to create data file at {}", location.as_ref().display())
+            })?;
+
         let mut index = IndexMap::new();
         let mut buffer = Vec::new();
         let mut acc = 0;
@@ -291,17 +262,32 @@ impl DataStore {
         }
 
         file.flush()?;
-        let index_file = location.as_ref().with_extension("index");
-        let index_data = bincode::serde::encode_to_vec(&index, bincode::config::standard())?;
-        std::fs::write(index_file, index_data)?;
-        file.sync_all()?;
-        Ok(Self {
+        let store = Self {
             index,
-            file: location.as_ref().to_path_buf(),
-        })
+            file,
+            location: location.as_ref().to_path_buf(),
+        };
+        store.write_index()?;
+        Ok(store)
+    }
+
+    fn write_index(&self) -> Result<()> {
+        let index_file = self.location.with_extension("index");
+        let index_data = bincode::serde::encode_to_vec(&self.index, bincode::config::standard())?;
+        std::fs::write(index_file, index_data)?;
+        Ok(())
     }
 
     fn open(location: impl AsRef<Path>) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .append(true)
+            .create(false)
+            .open(&location).with_context(|| {
+                format!("Failed to open data file at {}", location.as_ref().display())
+            })?;
+
         let index_file = location.as_ref().with_extension("index");
         if !index_file.exists() {
             bail!("Index file not found at {}", index_file.display());
@@ -311,36 +297,31 @@ impl DataStore {
             bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
         Ok(Self {
             index,
-            file: location.as_ref().to_path_buf(),
+            file,
+            location: location.as_ref().to_path_buf(),
         })
     }
 
-    fn read(&self, key: &str) -> Result<Option<Values>> {
+    fn read(&mut self, key: &str) -> Result<Option<Values>> {
         if !self.index.contains_key(key) {
             return Ok(None);
         }
 
         let (offset, size) = self.index.get(key).unwrap();
-        let mut file = std::fs::File::open(&self.file).with_context(|| {
-            format!("Failed to open data store file at {}", self.file.display())
-        })?;
-        file.seek(std::io::SeekFrom::Start(*offset as u64))?;
+        self.file.seek(std::io::SeekFrom::Start(*offset as u64))?;
         let mut buffer = vec![0; *size];
-        file.read_exact(&mut buffer)?;
+        self.file.read_exact(&mut buffer)?;
         Ok(Some(Values::decode(&buffer)?))
     }
 
-    fn read_many(&self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
-        let mut file = std::fs::File::open(&self.file).with_context(|| {
-            format!("Failed to open data store file at {}", self.file.display())
-        })?;
+    fn read_many(&mut self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
         let bytes = keys
             .iter()
             .map(|key| {
                 let (offset, size) = self.index.get(key).unwrap();
                 let mut buffer = vec![0; *size];
-                file.seek(std::io::SeekFrom::Start(*offset as u64))?;
-                file.read_exact(&mut buffer)?;
+                self.file.seek(std::io::SeekFrom::Start(*offset as u64))?;
+                self.file.read_exact(&mut buffer)?;
                 Ok(buffer)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -348,22 +329,38 @@ impl DataStore {
         Values::decode_many(bytes, trim_target)
     }
 
-    fn read_all(&self, trim_target: Option<usize>) -> Result<Values> {
-        let mut file = std::fs::File::open(&self.file).with_context(|| {
-            format!("Failed to open data store file at {}", self.file.display())
-        })?;
-
+    fn read_all(&mut self, trim_target: Option<usize>) -> Result<Values> {
+        self.file.rewind()?;
         let raw_bytes = self
             .index
             .iter()
             .map(|(_, (_, size))| {
                 let mut buffer = vec![0; *size];
-                file.read_exact(&mut buffer)?;
+                self.file.read_exact(&mut buffer)?;
                 Ok(buffer)
             })
             .collect::<Result<Vec<_>>>()?;
 
         Values::decode_many(raw_bytes, trim_target)
+    }
+
+    fn write_par(&mut self, data: impl IntoParallelIterator<Item = (String, Values)>) -> Result<()> {
+        let mut offset = self.file.seek(std::io::SeekFrom::End(0))? as usize;
+
+        let data: Vec<_> = data.into_par_iter().map(|(key, values)| {
+            (key, values.encode().unwrap())
+        }).collect();
+
+        data.into_iter().for_each(|(key, buffer)| {
+            let size = buffer.len();
+            self.file.write_all(&buffer).unwrap();
+            self.index.insert(key, (offset, size));
+            offset += size;
+        });
+
+        self.file.flush()?;
+        self.write_index()?;
+        Ok(())
     }
 }
 
