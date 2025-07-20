@@ -3,12 +3,12 @@ use bed_utils::bed::GenomicRange;
 use bincode::config::Configuration;
 use bincode::{Decode, Encode};
 use half::bf16;
+use indexmap::IndexMap;
 use itertools::Itertools;
 use ndarray::{s, Array1, Array2, ArrayD, Axis};
 use pyo3::prelude::*;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -22,12 +22,11 @@ pub(crate) struct DataChunkIter {
     pub(crate) root: PathBuf,
     pub(crate) chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
     pub(crate) chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
-    pub(crate) keys: Vec<String>,
     pub(crate) trim_target: Option<usize>,
 }
 
 impl Iterator for DataChunkIter {
-    type Item = (Sequences, Values);
+    type Item = DataChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(path) = self.chunks.next() {
@@ -35,13 +34,7 @@ impl Iterator for DataChunkIter {
             if let Some(trim_target) = self.trim_target {
                 chunk.set_trim_target(trim_target);
             }
-            let seqs = chunk.get_seqs().unwrap();
-            if self.keys.is_empty() {
-                None
-            } else {
-                let values = chunk.gets(&self.keys).unwrap();
-                Some((seqs, values))
-            }
+            Some(chunk)
         } else {
             let chr = self.chroms.next()?;
             self.chunks = Box::new(
@@ -63,6 +56,37 @@ impl Values {
             .axis_iter(Axis(0))
             .map(|row| row.mapv(|x| x.to_f32()))
     }
+
+    fn trim(self, trim_target: usize) -> Self {
+        let size = self.0.shape()[1];
+        let data = self.0.slice(s![.., trim_target..size - trim_target]);
+        Values(data.into_dyn().to_owned())
+    }
+
+    fn decode(buffer: &[u8]) -> Result<Self> {
+        let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(buffer))?;
+        let data: Values = bincode::decode_from_std_read::<_, Configuration, _>(
+            &mut decoder,
+            Configuration::default(),
+        )?;
+        Ok(data)
+    }
+
+    fn decode_many(buffers: Vec<Vec<u8>>, trim_target: Option<usize>) -> Result<Self> {
+        let values = buffers
+            .into_par_iter()
+            .map(|buffer| {
+                let data = Values::decode(&buffer)?;
+                if let Some(trim_target) = trim_target {
+                    Ok(data.trim(trim_target))
+                } else {
+                    Ok(data)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let values = values.iter().map(|arr| arr.0.view()).collect::<Vec<_>>();
+        Ok(Values(ndarray::stack(Axis(2), &values)?))
+    }
 }
 
 #[derive(Decode, Encode)]
@@ -71,6 +95,15 @@ pub struct Sequences(#[bincode(with_serde)] pub Array2<u8>);
 impl Sequences {
     pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
         self.0.axis_iter(Axis(0)).map(|row| row.to_owned())
+    }
+
+    fn decode(buffer: &[u8]) -> Result<Self> {
+        let mut seqs = zstd::stream::Decoder::new(std::io::Cursor::new(buffer))?;
+        let seqs: Sequences = bincode::decode_from_std_read::<_, Configuration, _>(
+            &mut seqs,
+            Configuration::default(),
+        )?;
+        Ok(seqs)
     }
 }
 
@@ -137,15 +170,26 @@ impl DataChunk {
         self.segments.len()
     }
 
+    pub fn keys(&self) -> Result<Vec<String>> {
+        if let Some(data_store) = &self.data_store {
+            Ok(data_store.index.keys().cloned().collect())
+        } else {
+            let data_dir = self.location.join("data");
+            let mut result = std::fs::read_dir(data_dir)?
+                .map(|entry| {
+                    let entry = entry?;
+                    Ok(entry.file_name().into_string().unwrap())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            result.sort();
+            Ok(result)
+        }
+    }
+
     pub fn get_seqs(&self) -> Result<Sequences> {
         let seq_file = self.location.join("sequence.dat");
         let seqs = std::fs::read(seq_file)?;
-        let mut seqs = zstd::stream::Decoder::new(std::io::Cursor::new(seqs))?;
-        let seqs: Sequences = bincode::decode_from_std_read::<_, Configuration, _>(
-            &mut seqs,
-            Configuration::default(),
-        )?;
-        Ok(seqs)
+        Sequences::decode(&seqs)
     }
 
     pub fn get_seq_at(&self, i: usize) -> Result<Array1<u8>> {
@@ -160,42 +204,29 @@ impl DataChunk {
         Ok(seq)
     }
 
+    fn data_store(&self) -> Result<&DataStore> {
+        self.data_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Data store not initialized. Please call `finish()` to create the data store."
+            )
+        })
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Values>> {
-        let path = self.location.join("data").join(key);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = std::fs::read(path)?;
-        let mut data = zstd::stream::Decoder::new(std::io::Cursor::new(data))?;
-        let data: Values = bincode::decode_from_std_read::<_, Configuration, _>(
-            &mut data,
-            Configuration::default(),
-        )?;
+        let data = self.data_store()?.read(key)?;
         if let Some(trim_target) = self.trim_target {
-            let size = data.0.shape()[1];
-            let data = data.0.slice(s![.., trim_target..size - trim_target]);
-            Ok(Some(Values(data.into_dyn().to_owned())))
+            Ok(data.map(|x| x.trim(trim_target)))
         } else {
-            Ok(Some(data))
+            Ok(data)
         }
     }
 
     pub fn gets(&self, keys: &[String]) -> Result<Values> {
-        let values = keys
-            .par_iter()
-            .map(|key| {
-                let data = self.get(key)?.with_context(|| {
-                    format!(
-                        "Failed to get key '{}' from chunk at {}",
-                        key,
-                        self.location.display()
-                    )
-                })?;
-                Ok(data.0)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let values = values.iter().map(|arr| arr.view()).collect::<Vec<_>>();
-        Ok(Values(ndarray::stack(Axis(2), &values)?))
+        self.data_store()?.read_many(keys, self.trim_target)
+    }
+
+    pub fn read_all(&self) -> Result<Values> {
+        self.data_store()?.read_all(self.trim_target)
     }
 
     pub fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
@@ -221,15 +252,14 @@ impl DataChunk {
 
     /// Consolidates the data chunk by merging data files into a single file.
     pub fn consolidate(&mut self) -> Result<()> {
-        let data_files = std::fs::read_dir(self.location.join("data"))?
+        let mut data_files = std::fs::read_dir(self.location.join("data"))?
             .map(|entry| {
                 let entry = entry?;
                 Ok((entry.file_name().into_string().unwrap(), entry.path()))
-            }).collect::<Result<Vec<_>>>()?;
-        let data_store = DataStore::create(
-            self.location.join("_data"),
-            data_files,
-        )?;
+            })
+            .collect::<Result<Vec<_>>>()?;
+        data_files.sort_by(|a, b| a.0.cmp(&b.0));
+        let data_store = DataStore::create(self.location.join("_data"), data_files)?;
         self.data_store = Some(data_store);
         std::fs::remove_dir_all(self.location.join("data"))?;
         Ok(())
@@ -238,14 +268,17 @@ impl DataChunk {
 
 #[derive(Debug)]
 struct DataStore {
-    index: BTreeMap<String, (usize, usize)>,
-    file: std::fs::File,
+    index: IndexMap<String, (usize, usize)>,
+    file: PathBuf,
 }
 
 impl DataStore {
-    fn create(location: impl AsRef<Path>, data: impl IntoIterator<Item = (String, impl AsRef<Path>)>) -> Result<Self> {
+    fn create(
+        location: impl AsRef<Path>,
+        data: impl IntoIterator<Item = (String, impl AsRef<Path>)>,
+    ) -> Result<Self> {
         let mut file = std::fs::File::create(&location)?;
-        let mut index = BTreeMap::new();
+        let mut index = IndexMap::new();
         let mut buffer = Vec::new();
         let mut acc = 0;
 
@@ -258,30 +291,79 @@ impl DataStore {
         }
 
         file.flush()?;
-        let index_file = location.as_ref().join(".index");
-        let index_data = bincode::encode_to_vec(&index, bincode::config::standard())?;
+        let index_file = location.as_ref().with_extension("index");
+        let index_data = bincode::serde::encode_to_vec(&index, bincode::config::standard())?;
         std::fs::write(index_file, index_data)?;
+        file.sync_all()?;
         Ok(Self {
             index,
-            file,
+            file: location.as_ref().to_path_buf(),
         })
     }
 
     fn open(location: impl AsRef<Path>) -> Result<Self> {
-        let index_file = location.as_ref().join(".index");
+        let index_file = location.as_ref().with_extension("index");
         if !index_file.exists() {
             bail!("Index file not found at {}", index_file.display());
         }
         let index_data = std::fs::read(index_file)?;
-        let index: BTreeMap<String, (usize, usize)> =
-            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
-        let file = std::fs::File::open(location.as_ref())?;
-        Ok(Self { index, file })
+        let index: IndexMap<String, (usize, usize)> =
+            bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
+        Ok(Self {
+            index,
+            file: location.as_ref().to_path_buf(),
+        })
     }
 
-    fn close(self) -> Result<()> {
-        self.file.sync_all()?;
-        Ok(())
+    fn read(&self, key: &str) -> Result<Option<Values>> {
+        if !self.index.contains_key(key) {
+            return Ok(None);
+        }
+
+        let (offset, size) = self.index.get(key).unwrap();
+        let mut file = std::fs::File::open(&self.file).with_context(|| {
+            format!("Failed to open data store file at {}", self.file.display())
+        })?;
+        file.seek(std::io::SeekFrom::Start(*offset as u64))?;
+        let mut buffer = vec![0; *size];
+        file.read_exact(&mut buffer)?;
+        Ok(Some(Values::decode(&buffer)?))
+    }
+
+    fn read_many(&self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
+        let mut file = std::fs::File::open(&self.file).with_context(|| {
+            format!("Failed to open data store file at {}", self.file.display())
+        })?;
+        let bytes = keys
+            .iter()
+            .map(|key| {
+                let (offset, size) = self.index.get(key).unwrap();
+                let mut buffer = vec![0; *size];
+                file.seek(std::io::SeekFrom::Start(*offset as u64))?;
+                file.read_exact(&mut buffer)?;
+                Ok(buffer)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Values::decode_many(bytes, trim_target)
+    }
+
+    fn read_all(&self, trim_target: Option<usize>) -> Result<Values> {
+        let mut file = std::fs::File::open(&self.file).with_context(|| {
+            format!("Failed to open data store file at {}", self.file.display())
+        })?;
+
+        let raw_bytes = self
+            .index
+            .iter()
+            .map(|(_, (_, size))| {
+                let mut buffer = vec![0; *size];
+                file.read_exact(&mut buffer)?;
+                Ok(buffer)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Values::decode_many(raw_bytes, trim_target)
     }
 }
 

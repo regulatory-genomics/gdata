@@ -128,12 +128,10 @@ impl GenomeDataBuilder {
         })
     }
 
-    /*
     fn iter_chunks(
         &self,
-        buffer_size: usize,
         trim_target: Option<usize>,
-    ) -> impl Iterator<Item = DataChunk> + '_ {
+    ) -> impl Iterator<Item = DataChunk> {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -157,11 +155,9 @@ impl GenomeDataBuilder {
             root: self.location.clone(),
             chroms,
             chunks: Box::new(std::iter::empty()),
-            keys: self.keys().unwrap(),
             trim_target,
         }
     }
-    */
 
     /// Iterates over the genomic data chunks, allowing for efficient traversal of genomic datasets.
     pub(super) fn iter_chunk_data(
@@ -169,32 +165,8 @@ impl GenomeDataBuilder {
         buffer_size: usize,
         trim_target: Option<usize>,
     ) -> PrefetchIterator<(Sequences, Values)> {
-        let chroms = Box::new(
-            self.chrom_sizes
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
-        let trim_target = trim_target.map(|t| {
-            if t >= self.window_size as usize {
-                panic!("Trim target must be less than window size");
-            } else if t % self.resolution as usize != 0 {
-                panic!(
-                    "Trim target must be a multiple of resolution ({})",
-                    self.resolution
-                );
-            } else {
-                t / self.resolution as usize
-            }
-        });
-        let iter = DataChunkIter {
-            root: self.location.clone(),
-            chroms,
-            chunks: Box::new(std::iter::empty()),
-            keys: self.keys().unwrap(),
-            trim_target,
-        };
+        let iter = self.iter_chunks(trim_target)
+            .map(|chunk| (chunk.get_seqs().unwrap(), chunk.read_all().unwrap()));
         PrefetchIterator::new(iter, buffer_size)
     }
 }
@@ -389,11 +361,8 @@ impl GenomeDataBuilder {
     pub fn keys(&self) -> Result<Vec<String>> {
         if let Some(chr) = self.chrom_sizes.keys().next() {
             if let Some(entry) = std::fs::read_dir(self.location.join(&chr))?.next() {
-                let mut result = std::fs::read_dir(entry?.path().join("data"))?
-                    .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-                    .collect::<Result<Vec<_>>>()?;
-                result.sort();
-                Ok(result)
+                let chunk = DataChunk::open(entry?.path())?;
+                chunk.keys()
             } else {
                 Ok(Vec::new())
             }
@@ -500,6 +469,13 @@ impl GenomeDataBuilder {
                 data.save_data(key, &Values(arr))?;
             }
         }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        self.iter_chunks(None).try_for_each(|mut chunk| {
+            chunk.consolidate()
+        })?;
         Ok(())
     }
 }

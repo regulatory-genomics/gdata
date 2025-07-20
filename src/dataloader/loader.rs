@@ -104,8 +104,8 @@ impl GenomeDataLoader {
        list[str]
            A sorted list of keys as strings.
     */
-    fn keys(&self) -> Vec<String> {
-        self.0.keys.clone()
+    fn keys(&self) -> Result<Vec<String>> {
+        self.0.data.keys()
     }
 
     /** Returns the segments of the genome as a vector of strings.
@@ -380,7 +380,6 @@ impl _DataIndexer {
 
 struct _DataLoader {
     data: GenomeDataBuilder,
-    keys: Vec<String>,
     batch_size: usize,
     trim_target: Option<usize>,
     tag: Option<String>,
@@ -398,10 +397,8 @@ impl _DataLoader {
         prefetch: usize,
     ) -> Result<Self> {
         let data = GenomeDataBuilder::open(location)?;
-        let keys = data.keys()?;
         Ok(Self {
             data,
-            keys,
             batch_size,
             trim_target,
             prefetch,

@@ -15,6 +15,7 @@ ndarray = { version = "0.16", features = ["serde"] }
 bigtools = "0.5.6"
 bincode = { version = "2", features = ["serde"] }
 itertools = "0.14"
+indexmap = { version = "2.10", features = ["serde"] }
 half = { version = "2.6", features = ["serde"] }
 hdf5 = { package = "hdf5-metno", version = "0.10" }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
