@@ -84,9 +84,9 @@ use crate::w5z::W5Z;
 #[pyclass]
 pub struct GenomeDataBuilder {
     chrom_sizes: BTreeMap<String, u64>,
-    window_size: u64,
+    pub(crate) window_size: u64,
     pub(crate) resolution: u64,
-    location: PathBuf,
+    pub(crate) location: PathBuf,
     pub(crate) seq_index: ChunkIndex,
 }
 
@@ -355,11 +355,11 @@ impl GenomeDataBuilder {
        list[str]
            A sorted list of keys as strings.
     */
-    pub fn keys(&self) -> Result<Vec<String>> {
+    pub fn tracks(&self) -> Result<Vec<String>> {
         if let Some(chr) = self.chrom_sizes.keys().next() {
             if let Some(entry) = std::fs::read_dir(self.location.join(&chr))?.next() {
                 let chunk = DataChunk::open(entry?.path())?;
-                Ok(chunk.keys())
+                Ok(chunk.keys().cloned().collect())
             } else {
                 Ok(Vec::new())
             }

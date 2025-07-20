@@ -94,7 +94,7 @@ impl GenomeDataLoader {
         )?)))
     }
 
-    /** Returns the keys (track names) in the dataset.
+    /** Returns the track names in the dataset.
 
        This method retrieves all keys from the dataset, which are typically the names of files
        containing genomic data. The keys are sorted alphabetically.
@@ -104,8 +104,9 @@ impl GenomeDataLoader {
        list[str]
            A sorted list of keys as strings.
     */
-    fn keys(&self) -> Result<Vec<String>> {
-        self.0.data.keys()
+    #[getter]
+    fn tracks(&self) -> Result<Vec<String>> {
+        self.0.data.tracks()
     }
 
     /** Returns the segments of the genome as a vector of strings.
@@ -115,8 +116,9 @@ impl GenomeDataLoader {
        list[str]
            A list of segment strings representing genomic ranges.
     */
-    fn segments(&self) -> Vec<String> {
-        self.0.data.seq_index.keys().cloned().collect()
+    #[getter]
+    fn segments(&self) -> Vec<&String> {
+        self.0.data.seq_index.keys().collect()
     }
 
     #[getter]
@@ -129,11 +131,32 @@ impl GenomeDataLoader {
         self.0.batch_size
     }
 
+    /** Returns the sequence indexer for accessing genomic sequences.
+
+        This method provides an indexer that allows access to the genomic sequences
+        associated with the dataset. It can be used to retrieve sequences by their keys.
+
+        Returns
+        -------
+        _SeqIndexer
+            An indexer for accessing genomic sequences.
+    */
     #[getter]
     fn seq(&self) -> _SeqIndexer {
         _SeqIndexer(self.0.clone())
     }
 
+    /** Returns the data indexer for accessing genomic data.
+
+        This method provides an indexer that allows access to the genomic data
+        associated with the sequences. It can be used to retrieve values for specific
+        genomic regions and tracks.
+
+        Returns
+        -------
+        _DataIndexer
+            An indexer for accessing genomic data.
+    */
     #[getter]
     fn data(&self) -> _DataIndexer {
         _DataIndexer(self.0.clone())
@@ -218,6 +241,10 @@ else:
             chunks: slf.0.data.iter_chunk_data(slf.0.prefetch, slf.0.trim_target),
             seq_as_string: slf.0.seq_as_string,
         }
+    }
+
+    fn __repr__(&self) -> String {
+        self.0.to_string()
     }
 }
 
@@ -385,6 +412,23 @@ struct _DataLoader {
     tag: Option<String>,
     seq_as_string: bool,
     prefetch: usize,
+}
+
+impl std::fmt::Display for _DataLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        writeln!(
+            f,
+            "GenomeDataLoader at '{}' with {} segments x {} tracks:",
+            self.data.location.display(), self.data.seq_index.len(), self.data.tracks().unwrap().len()
+        )?;
+        write!(
+            f,
+            "    window_size = {}, resolution = {}, batch_size = {}, trim_target = {}",
+            self.data.window_size, self.data.resolution, 
+            self.batch_size, self.trim_target.unwrap_or(0), 
+        )?;
+        Ok(())
+    }
 }
 
 impl _DataLoader {

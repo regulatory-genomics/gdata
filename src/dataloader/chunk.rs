@@ -57,6 +57,19 @@ impl Values {
             .map(|row| row.mapv(|x| x.to_f32()))
     }
 
+    fn transform(&mut self, scale: Option<bf16>, clamp_max: Option<bf16>) {
+        self.0.map_inplace(|x| {
+            if let Some(scale) = scale {
+                *x *= scale;
+            }
+            if let Some(clamp_max) = clamp_max {
+                if *x > clamp_max {
+                    *x = clamp_max;
+                }
+            }
+        })
+    }
+
     fn trim(self, trim_target: usize) -> Self {
         let size = self.0.shape()[1];
         let data = self.0.slice(s![.., trim_target..size - trim_target]);
@@ -170,8 +183,8 @@ impl DataChunk {
         self.segments.len()
     }
 
-    pub fn keys(&self) -> Vec<String> {
-        self.data_store.index.keys().cloned().collect()
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.data_store.index.keys()
     }
 
     pub fn get_seqs(&self) -> Result<Sequences> {
