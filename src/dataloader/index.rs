@@ -1,5 +1,5 @@
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
-use crate::dataloader::builder::DataChunk;
+use crate::dataloader::chunk::DataChunk;
 
 pub struct SegmentIndex(BTreeMap<String, (PathBuf, usize)>);
 

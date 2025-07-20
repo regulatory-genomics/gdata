@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use half::bf16;
 use ndarray::{Array1, Array2, ArrayD};
 use numpy::{PyArray1, PyArray2, PyArrayDyn};
-use pyo3::ffi::c_str;
 use pyo3::{prelude::*, py_run};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::dataloader::builder::{decode_nucleotide, GenomeDataBuilder, Sequences, Values};
+use crate::dataloader::builder::GenomeDataBuilder;
+use crate::dataloader::chunk::{decode_nucleotide, Sequences, Values};
 use crate::utils::PrefetchIterator;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
