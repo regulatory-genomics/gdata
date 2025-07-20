@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::index::SegmentIndex;
+use crate::dataloader::index::{make_seq_index, ChunkIndex};
 use crate::utils::PrefetchIterator;
 use crate::w5z::W5Z;
 use crate::dataloader::chunk::{DataChunkIter, DataChunk, Sequences, Values};
@@ -28,6 +28,24 @@ use crate::dataloader::chunk::{DataChunkIter, DataChunk, Sequences, Values};
     This struct provides methods to create a new genomic dataset, open an existing dataset,
     and manage genomic data chunks. It supports operations like adding files, retrieving chromosome
     information, and iterating over data chunks.
+
+    The builder creates a structured dataset in a specified location:
+
+    root/
+    ├── metadata.json
+    ├── chr1/
+    │   ├── 0/
+    │   │   ├── data/
+    │   │   │   ├── chunk1
+    │   │   │   └── chunk2
+    │   │   |── sequence.dat
+    |   |   └── names.txt
+    │   |── 1/
+    │   │   ├── data/
+    │   │   │   ├── chunk1 
+    │   │   │   └── chunk2
+    │   │   ├── sequence.dat
+    │   │   └── names.txt
 
     Parameters
     ----------
@@ -70,7 +88,7 @@ pub struct GenomeDataBuilder {
     window_size: u64,
     pub(crate) resolution: u64,
     location: PathBuf,
-    pub(crate) index: SegmentIndex,
+    pub(crate) seq_index: ChunkIndex,
 }
 
 impl GenomeDataBuilder {
@@ -98,7 +116,7 @@ impl GenomeDataBuilder {
                 Ok((k.clone(), size))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let index = SegmentIndex::new(location.as_ref(), chrom_sizes.keys());
+        let index = make_seq_index(location.as_ref(), chrom_sizes.keys());
         let resolution = metadata.get("resolution").unwrap().as_u64().unwrap();
         let window_size = metadata.get("window_size").unwrap().as_u64().unwrap();
         Ok(Self {
@@ -106,12 +124,47 @@ impl GenomeDataBuilder {
             location: location.as_ref().to_path_buf(),
             window_size,
             resolution,
-            index,
+            seq_index: index,
         })
     }
 
+    /*
+    fn iter_chunks(
+        &self,
+        buffer_size: usize,
+        trim_target: Option<usize>,
+    ) -> impl Iterator<Item = DataChunk> + '_ {
+        let chroms = Box::new(
+            self.chrom_sizes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        let trim_target = trim_target.map(|t| {
+            if t >= self.window_size as usize {
+                panic!("Trim target must be less than window size");
+            } else if t % self.resolution as usize != 0 {
+                panic!(
+                    "Trim target must be a multiple of resolution ({})",
+                    self.resolution
+                );
+            } else {
+                t / self.resolution as usize
+            }
+        });
+        DataChunkIter {
+            root: self.location.clone(),
+            chroms,
+            chunks: Box::new(std::iter::empty()),
+            keys: self.keys().unwrap(),
+            trim_target,
+        }
+    }
+    */
+
     /// Iterates over the genomic data chunks, allowing for efficient traversal of genomic datasets.
-    pub(super) fn iter_chunks(
+    pub(super) fn iter_chunk_data(
         &self,
         buffer_size: usize,
         trim_target: Option<usize>,
@@ -277,13 +330,13 @@ impl GenomeDataBuilder {
             serde_json::to_string(&metadata)?,
         )?;
 
-        let index = SegmentIndex::new(&location, chrom_sizes.keys());
+        let seq_index = make_seq_index(&location, chrom_sizes.keys());
         Ok(Self {
             chrom_sizes,
             location,
             window_size,
             resolution,
-            index,
+            seq_index,
         })
     }
 
@@ -357,7 +410,7 @@ impl GenomeDataBuilder {
            A list of segment strings representing genomic ranges.
     */
     fn segments(&self) -> Vec<String> {
-        self.index.segments().cloned().collect()
+        self.seq_index.keys().cloned().collect()
     }
 
     /** Adds w5z files to the dataset.

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::dataloader::builder::GenomeDataBuilder;
-use crate::dataloader::chunk::{decode_nucleotide, Sequences, Values};
+use crate::dataloader::chunk::{decode_nucleotide, DataChunk, Sequences, Values};
 use crate::utils::PrefetchIterator;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
@@ -116,7 +116,7 @@ impl GenomeDataLoader {
            A list of segment strings representing genomic ranges.
     */
     fn segments(&self) -> Vec<String> {
-        self.0.data.index.segments().cloned().collect()
+        self.0.data.seq_index.keys().cloned().collect()
     }
 
     #[getter]
@@ -206,7 +206,7 @@ else:
     }
 
     fn __len__(&self) -> usize {
-        let n = self.0.data.index.len();
+        let n = self.0.data.seq_index.len();
         n / self.0.batch_size + if n % self.0.batch_size > 0 { 1 } else { 0 }
     }
 
@@ -215,7 +215,7 @@ else:
             loader: slf.0.clone(),
             buffer_seq: VecDeque::new(),
             buffer_data: VecDeque::new(),
-            chunks: slf.0.data.iter_chunks(slf.0.prefetch, slf.0.trim_target),
+            chunks: slf.0.data.iter_chunk_data(slf.0.prefetch, slf.0.trim_target),
             seq_as_string: slf.0.seq_as_string,
         }
     }
@@ -315,10 +315,10 @@ impl _SeqIndexer {
         let (chunk, i) = self
             .0
             .data
-            .index
-            .get_datachunk(key)
+            .seq_index
+            .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        Ok(chunk.get_seq_at(i)?)
+        Ok(DataChunk::open(chunk)?.get_seq_at(*i)?)
     }
 }
 
@@ -346,14 +346,14 @@ impl _DataIndexer {
         let (chunk, i) = self
             .0
             .data
-            .index
-            .get_datachunk(key)
+            .seq_index
+            .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let vals = chunk.gets(j)?;
+        let vals = DataChunk::open(chunk)?.gets(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))
-            .nth(i)
+            .nth(*i)
             .unwrap()
             .to_owned())
     }

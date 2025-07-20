@@ -7,6 +7,8 @@ use itertools::Itertools;
 use ndarray::{s, Array1, Array2, ArrayD, Axis};
 use pyo3::prelude::*;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -79,11 +81,12 @@ impl Sequences {
     retrieving data by keys, and iterating over the keys.
 */
 #[pyclass]
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DataChunk {
     location: PathBuf,
     pub(crate) segments: Vec<GenomicRange>,
     trim_target: Option<usize>,
+    data_store: Option<DataStore>,
 }
 
 impl DataChunk {
@@ -96,6 +99,7 @@ impl DataChunk {
             location: location.as_ref().to_path_buf(),
             segments,
             trim_target: None,
+            data_store: None,
         })
     }
 
@@ -111,10 +115,17 @@ impl DataChunk {
             .lines()
             .map(|line| GenomicRange::from_str(line).unwrap())
             .collect();
+        let store_path = location.join("_data");
+        let data_store = if store_path.exists() {
+            Some(DataStore::open(store_path)?)
+        } else {
+            None
+        };
         Ok(Self {
             location,
             segments,
             trim_target: None,
+            data_store,
         })
     }
 
@@ -205,6 +216,71 @@ impl DataChunk {
         let data = bincode::encode_to_vec::<_, Configuration>(data, Configuration::default())?;
         let data = zstd::bulk::Compressor::new(9)?.compress(&data)?;
         std::fs::write(self.location.join("data").join(key), data)?;
+        Ok(())
+    }
+
+    /// Consolidates the data chunk by merging data files into a single file.
+    pub fn consolidate(&mut self) -> Result<()> {
+        let data_files = std::fs::read_dir(self.location.join("data"))?
+            .map(|entry| {
+                let entry = entry?;
+                Ok((entry.file_name().into_string().unwrap(), entry.path()))
+            }).collect::<Result<Vec<_>>>()?;
+        let data_store = DataStore::create(
+            self.location.join("_data"),
+            data_files,
+        )?;
+        self.data_store = Some(data_store);
+        std::fs::remove_dir_all(self.location.join("data"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct DataStore {
+    index: BTreeMap<String, (usize, usize)>,
+    file: std::fs::File,
+}
+
+impl DataStore {
+    fn create(location: impl AsRef<Path>, data: impl IntoIterator<Item = (String, impl AsRef<Path>)>) -> Result<Self> {
+        let mut file = std::fs::File::create(&location)?;
+        let mut index = BTreeMap::new();
+        let mut buffer = Vec::new();
+        let mut acc = 0;
+
+        for (key, fl) in data {
+            buffer.clear();
+            let n = std::fs::File::open(fl)?.read_to_end(&mut buffer)?;
+            file.write_all(buffer.as_slice())?;
+            index.insert(key.to_string(), (acc, n));
+            acc += n;
+        }
+
+        file.flush()?;
+        let index_file = location.as_ref().join(".index");
+        let index_data = bincode::encode_to_vec(&index, bincode::config::standard())?;
+        std::fs::write(index_file, index_data)?;
+        Ok(Self {
+            index,
+            file,
+        })
+    }
+
+    fn open(location: impl AsRef<Path>) -> Result<Self> {
+        let index_file = location.as_ref().join(".index");
+        if !index_file.exists() {
+            bail!("Index file not found at {}", index_file.display());
+        }
+        let index_data = std::fs::read(index_file)?;
+        let index: BTreeMap<String, (usize, usize)> =
+            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
+        let file = std::fs::File::open(location.as_ref())?;
+        Ok(Self { index, file })
+    }
+
+    fn close(self) -> Result<()> {
+        self.file.sync_all()?;
         Ok(())
     }
 }
