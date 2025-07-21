@@ -305,6 +305,10 @@ impl Iterator for _DataLoaderIter {
 
 #[pymethods]
 impl _DataLoaderIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
     fn __next__<'a>(
         mut slf: PyRefMut<'a, Self>,
         py: Python<'a>,
