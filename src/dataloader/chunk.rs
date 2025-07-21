@@ -23,6 +23,7 @@ pub(crate) struct DataChunkIter {
     pub(crate) chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
     pub(crate) chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
     pub(crate) trim_target: Option<usize>,
+    pub(crate) mutable: bool,
 }
 
 impl Iterator for DataChunkIter {
@@ -30,7 +31,7 @@ impl Iterator for DataChunkIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(path) = self.chunks.next() {
-            let mut chunk = DataChunk::open(path).unwrap();
+            let mut chunk = DataChunk::open(path, self.mutable).unwrap();
             if let Some(trim_target) = self.trim_target {
                 chunk.set_trim_target(trim_target);
             }
@@ -150,11 +151,14 @@ impl DataChunk {
             location: location.as_ref().to_path_buf(),
             segments,
             trim_target: None,
-            data_store: DataStore::create(location.as_ref().join("data"), std::iter::empty::<(_, String)>())?,
+            data_store: DataStore::create(
+                location.as_ref().join("data"),
+                std::iter::empty::<(_, String)>(),
+            )?,
         })
     }
 
-    pub fn open(location: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(location: impl AsRef<Path>, writable: bool) -> Result<Self> {
         let location = location.as_ref().to_path_buf();
         if !location.exists() {
             return Err(anyhow::anyhow!(
@@ -171,7 +175,7 @@ impl DataChunk {
             location,
             segments,
             trim_target: None,
-            data_store: DataStore::open(store_path)?,
+            data_store: DataStore::open(store_path, writable)?,
         })
     }
 
@@ -236,7 +240,10 @@ impl DataChunk {
         Ok(())
     }
 
-    pub fn save_data(&mut self, data: impl IntoParallelIterator<Item = (String, Values)>) -> Result<()> {
+    pub fn save_data(
+        &mut self,
+        data: impl IntoParallelIterator<Item = (String, Values)>,
+    ) -> Result<()> {
         self.data_store.write_par(data)
     }
 }
@@ -258,8 +265,12 @@ impl DataStore {
             .read(true)
             .append(true)
             .create(true)
-            .open(&location).with_context(|| {
-                format!("Failed to create data file at {}", location.as_ref().display())
+            .open(&location)
+            .with_context(|| {
+                format!(
+                    "Failed to create data file at {}",
+                    location.as_ref().display()
+                )
             })?;
 
         let mut index = IndexMap::new();
@@ -291,15 +302,20 @@ impl DataStore {
         Ok(())
     }
 
-    fn open(location: impl AsRef<Path>) -> Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .append(true)
-            .create(false)
-            .open(&location).with_context(|| {
-                format!("Failed to open data file at {}", location.as_ref().display())
-            })?;
+    fn open(location: impl AsRef<Path>, writable: bool) -> Result<Self> {
+        let mut opt = std::fs::OpenOptions::new();
+        let opt = opt.create(false).read(true);
+        let opt = if writable {
+            opt.write(true).append(true)
+        } else {
+            opt.write(false)
+        };
+        let file = opt.open(&location).with_context(|| {
+            format!(
+                "Failed to open data file at {}",
+                location.as_ref().display()
+            )
+        })?;
 
         let index_file = location.as_ref().with_extension("index");
         if !index_file.exists() {
@@ -357,12 +373,16 @@ impl DataStore {
         Values::decode_many(raw_bytes, trim_target)
     }
 
-    fn write_par(&mut self, data: impl IntoParallelIterator<Item = (String, Values)>) -> Result<()> {
+    fn write_par(
+        &mut self,
+        data: impl IntoParallelIterator<Item = (String, Values)>,
+    ) -> Result<()> {
         let mut offset = self.file.seek(std::io::SeekFrom::End(0))? as usize;
 
-        let data: Vec<_> = data.into_par_iter().map(|(key, values)| {
-            (key, values.encode().unwrap())
-        }).collect();
+        let data: Vec<_> = data
+            .into_par_iter()
+            .map(|(key, values)| (key, values.encode().unwrap()))
+            .collect();
 
         data.into_iter().for_each(|(key, buffer)| {
             let size = buffer.len();

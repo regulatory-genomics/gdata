@@ -30,7 +30,7 @@ pub(crate) fn make_seq_index<'a>(
                 .unwrap()
                 .flat_map(|entry| {
                     let path = entry.unwrap().path();
-                    let chunk = DataChunk::open(&path).unwrap();
+                    let chunk = DataChunk::open(&path, false).unwrap();
                     chunk
                         .segments
                         .iter()

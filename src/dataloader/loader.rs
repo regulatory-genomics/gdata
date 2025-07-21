@@ -238,7 +238,7 @@ else:
             loader: slf.0.clone(),
             buffer_seq: VecDeque::new(),
             buffer_data: VecDeque::new(),
-            chunks: slf.0.data.iter_chunk_data(slf.0.prefetch, slf.0.trim_target),
+            chunks: slf.0.data.iter_chunk_data(slf.0.prefetch, slf.0.trim_target, false),
             seq_as_string: slf.0.seq_as_string,
         }
     }
@@ -349,7 +349,7 @@ impl _SeqIndexer {
             .seq_index
             .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        Ok(DataChunk::open(chunk)?.get_seq_at(*i)?)
+        Ok(DataChunk::open(chunk, false)?.get_seq_at(*i)?)
     }
 }
 
@@ -380,7 +380,7 @@ impl _DataIndexer {
             .seq_index
             .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let vals = DataChunk::open(chunk)?.gets(j)?;
+        let vals = DataChunk::open(chunk, false)?.gets(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))

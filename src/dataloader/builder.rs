@@ -127,7 +127,7 @@ impl GenomeDataBuilder {
         })
     }
 
-    fn iter_chunks(&self, trim_target: Option<usize>) -> impl Iterator<Item = DataChunk> {
+    fn iter_chunks(&self, trim_target: Option<usize>, mutable: bool) -> impl Iterator<Item = DataChunk> {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -152,6 +152,7 @@ impl GenomeDataBuilder {
             chroms,
             chunks: Box::new(std::iter::empty()),
             trim_target,
+            mutable,
         }
     }
 
@@ -160,9 +161,10 @@ impl GenomeDataBuilder {
         &self,
         buffer_size: usize,
         trim_target: Option<usize>,
+        mutable: bool,
     ) -> PrefetchIterator<(Sequences, Values)> {
         let iter = self
-            .iter_chunks(trim_target)
+            .iter_chunks(trim_target, mutable)
             .map(|mut chunk| (chunk.get_seqs().unwrap(), chunk.read_all().unwrap()));
         PrefetchIterator::new(iter, buffer_size)
     }
@@ -358,7 +360,7 @@ impl GenomeDataBuilder {
     pub fn tracks(&self) -> Result<Vec<String>> {
         if let Some(chr) = self.chrom_sizes.keys().next() {
             if let Some(entry) = std::fs::read_dir(self.location.join(&chr))?.next() {
-                let chunk = DataChunk::open(entry?.path())?;
+                let chunk = DataChunk::open(entry?.path(), false)?;
                 Ok(chunk.keys().cloned().collect())
             } else {
                 Ok(Vec::new())
@@ -403,7 +405,7 @@ impl GenomeDataBuilder {
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
                 py.check_signals()?;
-                self.iter_chunks(None)
+                self.iter_chunks(None, true)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {
