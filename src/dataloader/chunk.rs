@@ -6,6 +6,7 @@ use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use ndarray::{s, Array1, Array2, ArrayD, Axis};
+use numpy::PyArray2;
 use pyo3::prelude::*;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::io::{Read, Seek, Write};
@@ -109,12 +110,32 @@ impl Values {
     }
 }
 
-#[derive(Decode, Encode)]
+#[derive(Debug, Decode, Encode, PartialEq)]
 pub struct Sequences(#[bincode(with_serde)] pub Array2<u8>);
+
+impl<'py> IntoPyObject<'py> for Sequences {
+    type Target = PyArray2<u8>;
+    type Output = Bound<'py, Self::Target>;
+    type Error = anyhow::Error;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(PyArray2::from_owned_array(py, self.0))
+    }
+}
 
 impl Sequences {
     pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
         self.0.axis_iter(Axis(0)).map(|row| row.to_owned())
+    }
+
+    pub fn into_strings(self) -> Vec<String> {
+        self.0.rows()
+            .into_iter()
+            .map(|row| {
+                let row: Vec<_> = row.iter().map(|x| decode_nucleotide(*x).unwrap()).collect();
+                String::from_utf8(row).unwrap()
+            })
+            .collect::<Vec<_>>()
     }
 
     fn decode(buffer: &[u8]) -> Result<Self> {
@@ -396,57 +417,6 @@ impl DataStore {
         Ok(())
     }
 }
-
-/*
-#[pymethods]
-impl DataChunk {
-    fn keys(&self) -> Result<Vec<String>> {
-        std::fs::read_dir(self.location.join("data"))?
-            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-            .collect()
-    }
-
-    /// Returns the dna sequences stored in this data chunk.
-    /// The nucleotides are encoded as integers:
-    /// - A: 0
-    /// - C: 1
-    /// - G: 2
-    /// - T: 3
-    /// - N: 4
-    fn sequences<'a>(&'a self, py: Python<'a>) -> Result<Bound<'a, PyArray2<u8>>> {
-        let seqs = self.get_seqs()?;
-        Ok(PyArray2::from_owned_array(py, seqs.0))
-    }
-
-    /// Retrieves the values associated with a key or keys from the data chunk.
-    fn __getitem__<'a>(&'a self, py: Python<'a>, key: Bound<'_, PyAny>) -> Result<Bound<'a, PyArrayDyn<f32>>> {
-        let arr = if let Ok(key) = key.extract::<String>() {
-            self
-                .get(&key)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Key '{}' not found in chunk at {}",
-                        key,
-                        self.location.display()
-                    )
-                })
-                .map(|values| values.0)?
-        } else {
-            let key: Vec<String> = key.extract()?;
-            self.gets(key.as_slice())?.0
-        };
-        Ok(PyArrayDyn::from_owned_array(py, arr.mapv(|x| x.to_f32())))
-    }
-
-    fn __len__(&self) -> usize {
-        self.segments.len()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("DataChunk at '{}'", self.location.display())
-    }
-}
-*/
 
 pub(crate) fn encode_nucleotide(base: u8) -> Result<u8> {
     let b = match base {

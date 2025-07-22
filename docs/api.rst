@@ -14,6 +14,7 @@ Core Classes
     :toctree: _autosummary
 
     GenomeDataLoader
+    MultiGenomeDataLoader
     GenomeDataBuilder
 
 Utilities

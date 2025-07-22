@@ -4,4 +4,4 @@ mod index;
 mod chunk;
 
 pub use builder::GenomeDataBuilder;
-pub use loader::GenomeDataLoader;
+pub use loader::{GenomeDataLoader, MultiGenomeDataLoader};
