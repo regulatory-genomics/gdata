@@ -7,7 +7,6 @@ use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::dataloader::builder::GenomeDataBuilder;
 use crate::dataloader::chunk::{DataChunk, Sequences, Values};
@@ -50,7 +49,7 @@ use crate::utils::PrefetchIterator;
     See Also
     --------
     GenomeDataBuilder
-    MultiGenomeDataLoader
+    GenomeDataLoaderMap
 
     Examples
     --------
@@ -65,7 +64,7 @@ use crate::utils::PrefetchIterator;
 */
 #[pyclass]
 pub struct GenomeDataLoader {
-    builder: Arc<GenomeDataBuilder>,
+    builder: GenomeDataBuilder,
     batch_size: usize,
     trim_target: Option<usize>,
     seq_as_string: bool,
@@ -124,7 +123,7 @@ impl GenomeDataLoader {
         prefetch: usize,
     ) -> Result<Self> {
         Ok(Self {
-            builder: Arc::new(GenomeDataBuilder::open(location)?),
+            builder: GenomeDataBuilder::open(location)?,
             batch_size,
             trim_target,
             seq_as_string,
@@ -180,8 +179,8 @@ impl GenomeDataLoader {
             An indexer for accessing genomic sequences.
     */
     #[getter]
-    fn seq(&self) -> SeqIndexer {
-        SeqIndexer(self.builder.clone())
+    fn seq(slf: PyRef<'_, Self>) -> SeqIndexer {
+        SeqIndexer(slf.into())
     }
 
     /** Returns the data indexer for accessing genomic data.
@@ -196,8 +195,8 @@ impl GenomeDataLoader {
             An indexer for accessing genomic data.
     */
     #[getter]
-    fn data(&self) -> DataIndexer {
-        DataIndexer(self.builder.clone())
+    fn data(slf: PyRef<'_, Self>) -> DataIndexer {
+        DataIndexer(slf.into())
     }
 
     /** Plots the genomic signal for a specified region and tracks.
@@ -225,17 +224,17 @@ impl GenomeDataLoader {
         text_signature = "($self, region, tracks, *, savefig=None)"
     )]
     fn plot(
-        &self,
+        slf: PyRef<'_, Self>,
         py: Python<'_>,
         region: &str,
         tracks: Bound<'_, PyAny>,
         savefig: Option<PathBuf>,
     ) -> Result<()> {
-        let data_indexer = self.data();
+        let highlight_start = slf.trim_target.map(|d| d as u64 / slf.builder.resolution);
+        let data_indexer = Self::data(slf);
         let key = (region, &tracks).into_pyobject(py)?.into_any();
         let signal_values = data_indexer.__getitem__(py, key)?;
         let track_names = extract_string_list(tracks)?;
-        let highlight_start = self.trim_target.map(|d| d as u64 / self.builder.resolution);
 
         let py_code = r#"
 from matplotlib import pyplot as plt
@@ -363,12 +362,13 @@ impl DataLoaderIter {
 }
 
 #[pyclass]
-pub struct SeqIndexer(Arc<GenomeDataBuilder>);
+pub struct SeqIndexer(Py<GenomeDataLoader>);
 
 impl SeqIndexer {
-    fn get(&self, key: &str) -> Result<Array1<u8>> {
-        let (chunk, i) = self
-            .0
+    fn get(&self, py: Python<'_>, key: &str) -> Result<Array1<u8>> {
+        let py_ref = self.0.borrow(py);
+        let (chunk, i) = py_ref
+            .builder
             .seq_index
             .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
@@ -384,7 +384,7 @@ impl SeqIndexer {
         key: Bound<'a, PyAny>,
     ) -> Result<Bound<'a, PyAny>> {
         if let Ok(key) = key.extract::<String>() {
-            Ok(PyArray1::from_owned_array(py, self.get(&key)?).into_any())
+            Ok(PyArray1::from_owned_array(py, self.get(py, &key)?).into_any())
         } else {
             let key: Vec<String> = key.extract()?;
             todo!()
@@ -393,12 +393,13 @@ impl SeqIndexer {
 }
 
 #[pyclass]
-pub struct DataIndexer(Arc<GenomeDataBuilder>);
+pub struct DataIndexer(Py<GenomeDataLoader>);
 
 impl DataIndexer {
-    fn get(&self, key: &str, j: &[String]) -> Result<ArrayD<bf16>> {
-        let (chunk, i) = self
-            .0
+    fn get(&self, py: Python<'_>, key: &str, j: &[String]) -> Result<ArrayD<bf16>> {
+        let py_ref = self.0.borrow(py);
+        let (chunk, i) = py_ref
+            .builder
             .seq_index
             .get(key)
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
@@ -426,58 +427,48 @@ impl DataIndexer {
             j.extract::<Vec<String>>()?
         };
 
-        let data = self.get(&i, &j)?.mapv(|x| x.to_f32());
+        let data = self.get(py, &i, &j)?.mapv(|x| x.to_f32());
         Ok(PyArrayDyn::from_owned_array(py, data))
     }
 }
 
-/** Similar to `GenomeDataLoader`, but for multiple genomic datasets.
-    
+/** A dictionary-like class for loading multiple genomic datasets simultaneously.
+
     This class allows you to load and iterate over multiple genomic datasets simultaneously,
     each identified by a unique tag. It ensures that all datasets share the same genomic segments,
     which is a requirement for consistent data processing.
 
+    Note
+    ----
+    The tracks in different loaders may have different resolutions, but the segments must be the same.
+    `GenomeDataLoaderMap` ensures that records correspond to the same genomic segments across all datasets,
+    but there is no guarantee that the data values returned by different loaders will be aligned, e.,.,
+    they may have different `resolution` or `trim_target`.
+
     Parameters
     ----------
-    locations : dict[str, Path]
-        A dictionary mapping tags to paths of genomic data directories.
-        Each path should point to a directory containing genomic data files.
-    batch_size : int
-        The number of genomic sequences to retrieve in each batch (default is 8).
+    loaders: dict[str, GenomeDataLoader]
+        A dictionary mapping tags to `GenomeDataLoader` instances.
+    batch_size : Optional[int]
+        Optional parameter to specify the batch size for loading genomic sequences.
+        If not provided, it defaults to the minimum batch size across all loaders.
     trim_target: Optional[int]
-        Trim both ends of the target vector according to the `trim_target` parameter.
-        As a result, the length of the values will be reduced by `2 * trim_target`.
-        The unit of `trim_target` is base pairs, and it must be a multiple of the resolution.
-        Note this only affects the values, not the sequences. The sequences will always
-        have the full length as defined in the dataset.
-        This is useful when you want to compute the loss on only the central part of the sequence.
-        This is because the edges of the sequence may contain
-        padding or other artifacts that should not be considered in the loss computation.
+        Optional parameter to specify the trim target for all loaders.
+        If not provided, each loader will use its own trim target.
     seq_as_string : bool
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
         such as for visualization or text-based analysis.
-    prefetch : int
-        The number of chunks to prefetch for efficient data loading (default is 1).
-        This allows for asynchronous loading of data, improving performance during training or inference.
-        But it will increase memory usage, so it should be set according to the available resources.
 
     See Also
     --------
     GenomeDataLoader
     GenomeDataBuilder
-
-    Examples
-    --------
-    >>> from gdata import as MultiGenomeDataLoader
-    >>> loader = MultiGenomeDataLoader({'ChIP': "data1", 'DNase': "data2"}, trim_target=40_960)
-    >>> for seq, data in loader:
-    ...     print(seq, data)
 */
 #[pyclass]
-pub struct MultiGenomeDataLoader(IndexMap<String, GenomeDataLoader>);
+pub struct GenomeDataLoaderMap(IndexMap<String, Py<GenomeDataLoader>>);
 
-impl std::fmt::Display for MultiGenomeDataLoader {
+impl std::fmt::Display for GenomeDataLoaderMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         writeln!(
             f,
@@ -489,38 +480,53 @@ impl std::fmt::Display for MultiGenomeDataLoader {
 }
 
 #[pymethods]
-impl MultiGenomeDataLoader {
+impl GenomeDataLoaderMap {
     #[new]
     #[pyo3(
         signature = (
-            locations, *, batch_size=8, trim_target=None, seq_as_string=false, prefetch=1,
+            loaders, *, batch_size=None, trim_target=None, seq_as_string=false,
         ),
-        text_signature = "($self, locations, *, batch_size=8, trim_target=None, seq_as_string=False, prefetch=1)"
+        text_signature = "($self, loaders, *, batch_size=None, trim_target=None, seq_as_string=False)"
     )]
     pub fn new(
-        locations: IndexMap<String, PathBuf>,
-        batch_size: usize,
+        mut loaders: IndexMap<String, PyRefMut<'_, GenomeDataLoader>>,
+        batch_size: Option<usize>,
         trim_target: Option<usize>,
         seq_as_string: bool,
-        prefetch: usize,
     ) -> Result<Self> {
-        let loaders = locations.into_iter()
-            .map(|(tag, loc)| {
-                let loader = GenomeDataLoader::new(
-                    loc,
-                    batch_size,
-                    trim_target,
-                    seq_as_string,
-                    prefetch,
-                )?;
-                Ok((tag, loader))
-            })
-            .collect::<Result<IndexMap<_, _>>>()?;
+        ensure!(
+            !loaders.is_empty(),
+            "At least one GenomeDataLoader must be provided"
+        );
         ensure!(
             loaders.values().map(|loader| loader.segments()).all_equal(),
             "All genome data loaders must have the same segments"
         );
-        Ok(Self(loaders))
+
+        let batch_size = batch_size.unwrap_or_else(|| {
+            loaders
+                .values()
+                .map(|loader| loader.batch_size)
+                .min()
+                .unwrap()
+        });
+        loaders.values_mut().for_each(|loader| {
+            loader.batch_size = batch_size;
+        });
+
+        if let Some(trim_target) = trim_target {
+            loaders.values_mut().for_each(|loader| {
+                loader.trim_target = Some(trim_target);
+            });
+        }
+
+        loaders.values_mut().for_each(|loader| {
+            loader.seq_as_string = seq_as_string;
+        });
+
+        Ok(Self(
+            loaders.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        ))
     }
 
     /** Returns the segments of the genome as a vector of strings.
@@ -531,20 +537,26 @@ impl MultiGenomeDataLoader {
            A list of segment strings representing genomic ranges.
     */
     #[getter]
-    fn segments(&self) -> Vec<&String> {
-        self.0[0].builder.seq_index.keys().collect()
+    fn segments(&self, py: Python) -> Vec<String> {
+        self.0[0]
+            .borrow(py)
+            .builder
+            .seq_index
+            .keys()
+            .cloned()
+            .collect()
     }
 
     #[getter]
-    fn batch_size(&self) -> usize {
-        self.0[0].batch_size
+    fn batch_size(&self, py: Python) -> usize {
+        self.0[0].borrow(py).batch_size
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> MultiDataLoaderIter {
+    fn __iter__(slf: PyRef<'_, Self>, py: Python) -> MultiDataLoaderIter {
         let iter = slf
             .0
             .iter()
-            .map(|(tag, loader)| (tag.clone(), loader.iter()))
+            .map(|(tag, loader)| (tag.clone(), loader.borrow(py).iter()))
             .collect();
         MultiDataLoaderIter(iter)
     }

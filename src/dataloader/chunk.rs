@@ -59,6 +59,7 @@ impl Values {
             .map(|row| row.mapv(|x| x.to_f32()))
     }
 
+    /// Perform in-place scaling and clamping on the values.
     fn transform(&mut self, scale: Option<bf16>, clamp_max: Option<bf16>) {
         self.0.map_inplace(|x| {
             if let Some(scale) = scale {
