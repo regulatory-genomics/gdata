@@ -19,9 +19,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::chunk::{DataChunk, DataChunkIter, Sequences, Values};
+use crate::dataloader::chunk::{DataChunk, DataChunkIter, Values};
 use crate::dataloader::index::{make_seq_index, ChunkIndex};
-use crate::utils::PrefetchIterator;
 use crate::w5z::W5Z;
 
 /** Represents a builder for genomic data, allowing for the creation and management of genomic datasets.
@@ -127,7 +126,7 @@ impl GenomeDataBuilder {
         })
     }
 
-    fn iter_chunks(&self, trim_target: Option<usize>, mutable: bool) -> impl Iterator<Item = DataChunk> {
+    pub(crate) fn iter_chunks(&self, trim_target: Option<usize>, mutable: bool) -> DataChunkIter {
         let chroms = Box::new(
             self.chrom_sizes
                 .keys()
@@ -154,19 +153,6 @@ impl GenomeDataBuilder {
             trim_target,
             mutable,
         }
-    }
-
-    /// Iterates over the genomic data chunks, allowing for efficient traversal of genomic datasets.
-    pub(super) fn iter_chunk_data(
-        &self,
-        buffer_size: usize,
-        trim_target: Option<usize>,
-        mutable: bool,
-    ) -> PrefetchIterator<(Sequences, Values)> {
-        let iter = self
-            .iter_chunks(trim_target, mutable)
-            .map(|mut chunk| (chunk.get_seqs().unwrap(), chunk.read_all().unwrap()));
-        PrefetchIterator::new(iter, buffer_size)
     }
 }
 

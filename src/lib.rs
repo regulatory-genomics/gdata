@@ -2,7 +2,6 @@ mod bam;
 mod bigwig;
 mod w5z;
 mod dataloader;
-mod utils;
 
 use pyo3::prelude::*;
 

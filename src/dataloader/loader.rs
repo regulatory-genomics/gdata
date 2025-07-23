@@ -7,10 +7,11 @@ use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::{Arc, Mutex};
 
 use crate::dataloader::builder::GenomeDataBuilder;
-use crate::dataloader::chunk::{DataChunk, Sequences, Values};
-use crate::utils::PrefetchIterator;
+use crate::dataloader::chunk::{DataChunk, DataChunkIter, Sequences};
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -42,7 +43,7 @@ use crate::utils::PrefetchIterator;
         This is useful for cases where you want to work with the sequences as text,
         such as for visualization or text-based analysis.
     prefetch : int
-        The number of chunks to prefetch for efficient data loading (default is 1).
+        The number of batches to prefetch for efficient data loading.
         This allows for asynchronous loading of data, improving performance during training or inference.
         But it will increase memory usage, so it should be set according to the available resources.
 
@@ -95,12 +96,15 @@ impl std::fmt::Display for GenomeDataLoader {
 impl GenomeDataLoader {
     fn iter(&self) -> DataLoaderIter {
         DataLoaderIter {
-            batch_size: self.batch_size,
-            buffer_seq: VecDeque::new(),
-            buffer_data: VecDeque::new(),
-            chunks: self
-                .builder
-                .iter_chunk_data(self.prefetch, self.trim_target, false),
+            iter: PrefethIterator::new(
+                _DataLoaderIter {
+                    batch_size: self.batch_size,
+                    buffer_seq: VecDeque::new(),
+                    buffer_data: VecDeque::new(),
+                    chunks: self.builder.iter_chunks(self.trim_target, false),
+                },
+                self.prefetch,
+            ),
             seq_as_string: self.seq_as_string,
         }
     }
@@ -111,9 +115,9 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8, trim_target=None, seq_as_string=false, prefetch=1,
+            location, *, batch_size=8, trim_target=None, seq_as_string=false, prefetch=16,
         ),
-        text_signature = "($self, location, *, batch_size=8, trim_target=None, seq_as_string=False, prefetch=1)"
+        text_signature = "($self, location, *, batch_size=8, trim_target=None, seq_as_string=False, prefetch=16)"
     )]
     pub fn new(
         location: PathBuf,
@@ -286,11 +290,8 @@ else:
 }
 
 #[pyclass]
-pub struct DataLoaderIter {
-    batch_size: usize,
-    buffer_seq: VecDeque<Array1<u8>>,
-    buffer_data: VecDeque<ArrayD<f32>>,
-    chunks: PrefetchIterator<(Sequences, Values)>,
+struct DataLoaderIter {
+    iter: PrefethIterator<(Sequences, ArrayD<f32>)>,
     seq_as_string: bool,
 }
 
@@ -298,9 +299,26 @@ impl Iterator for DataLoaderIter {
     type Item = (Sequences, ArrayD<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+struct _DataLoaderIter {
+    batch_size: usize,
+    buffer_seq: VecDeque<Array1<u8>>,
+    buffer_data: VecDeque<ArrayD<f32>>,
+    chunks: DataChunkIter,
+}
+
+impl Iterator for _DataLoaderIter {
+    type Item = (Sequences, ArrayD<f32>);
+
+    fn next(&mut self) -> Option<Self::Item> {
         let n_buffer = self.buffer_seq.len();
         if n_buffer < self.batch_size {
-            if let Some((seqs, values)) = self.chunks.next() {
+            if let Some(mut chunk) = self.chunks.next() {
+                let seqs = chunk.get_seqs().unwrap();
+                let values = chunk.read_all().unwrap();
                 self.buffer_seq.extend(seqs.iter_rows());
                 self.buffer_data.extend(values.iter_rows());
                 self.next()
@@ -358,6 +376,32 @@ impl DataLoaderIter {
             (seq, values).into_pyobject(py).unwrap()
         };
         Some(result)
+    }
+}
+
+pub struct PrefethIterator<T>(Arc<Mutex<Receiver<T>>>);
+
+impl<T: Send + 'static> PrefethIterator<T> {
+    fn new<I>(iter: I, buffer_size: usize) -> Self
+    where
+        I: Iterator<Item = T> + Send + 'static,
+    {
+        let (sender, receiver) = sync_channel(buffer_size);
+        std::thread::spawn(move || {
+            for item in iter {
+                sender.send(item).unwrap();
+            }
+        });
+        Self(Arc::new(Mutex::new(receiver)))
+    }
+}
+
+impl<T: Send + 'static> Iterator for PrefethIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.0.lock().unwrap().recv().ok();
+        item
     }
 }
 

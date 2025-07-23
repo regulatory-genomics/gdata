@@ -42,7 +42,8 @@ impl Iterator for DataChunkIter {
             self.chunks = Box::new(
                 std::fs::read_dir(self.root.join(&chr))
                     .unwrap()
-                    .map(|entry| entry.unwrap().path()),
+                    .map(|entry| entry.unwrap().path())
+                    .sorted_by_key(|p| p.file_name().unwrap().to_string_lossy().parse::<usize>().unwrap())
             );
             self.next()
         }
