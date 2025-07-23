@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::chunk::{DataChunk, DataChunkIter, Values};
+use crate::dataloader::chunk::{DataChunk, Values};
 use crate::dataloader::index::{make_seq_index, ChunkIndex};
 use crate::w5z::W5Z;
 
@@ -81,8 +81,9 @@ use crate::w5z::W5Z;
     >>> builder.add_files(tracks)
 */
 #[pyclass]
+#[derive(Debug, Clone)]
 pub struct GenomeDataBuilder {
-    chrom_sizes: BTreeMap<String, u64>,
+    pub(crate) chrom_sizes: BTreeMap<String, u64>,
     pub(crate) window_size: u64,
     pub(crate) resolution: u64,
     pub(crate) location: PathBuf,
@@ -124,35 +125,6 @@ impl GenomeDataBuilder {
             resolution,
             seq_index: index,
         })
-    }
-
-    pub(crate) fn iter_chunks(&self, trim_target: Option<usize>, mutable: bool) -> DataChunkIter {
-        let chroms = Box::new(
-            self.chrom_sizes
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
-        let trim_target = trim_target.map(|t| {
-            if t >= self.window_size as usize {
-                panic!("Trim target must be less than window size");
-            } else if t % self.resolution as usize != 0 {
-                panic!(
-                    "Trim target must be a multiple of resolution ({})",
-                    self.resolution
-                );
-            } else {
-                t / self.resolution as usize
-            }
-        });
-        DataChunkIter {
-            root: self.location.clone(),
-            chroms,
-            chunks: Box::new(std::iter::empty()),
-            trim_target,
-            mutable,
-        }
     }
 }
 
@@ -364,7 +336,7 @@ impl GenomeDataBuilder {
            A list of segment strings representing genomic ranges.
     */
     fn segments(&self) -> Vec<String> {
-        self.seq_index.keys().cloned().collect()
+        self.seq_index.keys().map(|x| x.pretty_show()).collect()
     }
 
     /** Adds w5z files to the dataset.
@@ -391,7 +363,7 @@ impl GenomeDataBuilder {
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
                 py.check_signals()?;
-                self.iter_chunks(None, true)
+                self.seq_index.iter_chunks(None, true)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {

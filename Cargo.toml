@@ -23,7 +23,7 @@ indicatif = "0.17"
 log = "0.4"
 pyo3-log = "0.12"
 noodles = { version = "0.99.0", features = ["core", "fasta", "sam", "bam"] }
-bed-utils = "0.9"
+bed-utils = "0.9.1"
 tokio = "1.34"
 bstr = "1"
 numcodecs-zfp = "0.5"

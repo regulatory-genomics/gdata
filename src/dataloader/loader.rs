@@ -1,17 +1,19 @@
 use anyhow::{ensure, Context, Result};
+use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayD};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::dataloader::builder::GenomeDataBuilder;
-use crate::dataloader::chunk::{DataChunk, DataChunkIter, Sequences};
+use crate::dataloader::chunk::{DataChunk, Sequences};
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -64,6 +66,7 @@ use crate::dataloader::chunk::{DataChunk, DataChunkIter, Sequences};
         :align: center
 */
 #[pyclass]
+#[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
     batch_size: usize,
@@ -94,6 +97,27 @@ impl std::fmt::Display for GenomeDataLoader {
 }
 
 impl GenomeDataLoader {
+    pub fn set_trim_target(&mut self, trim_target: usize) {
+        if trim_target >= self.builder.window_size as usize {
+            panic!("Trim target must be less than window size");
+        } else if trim_target % self.builder.resolution as usize != 0 {
+            panic!(
+                "Trim target must be a multiple of resolution ({})",
+                self.builder.resolution
+            );
+        }
+        self.trim_target = Some(trim_target / self.builder.resolution as usize);
+    }
+
+    pub fn intersect(&mut self, regions: impl Iterator<Item = GenomicRange>) {
+        let builder = &mut self.builder;
+        builder.seq_index = builder.seq_index.intersect(regions);
+        let chromosomes = builder.seq_index.chromosomes().collect::<HashSet<_>>();
+        builder
+            .chrom_sizes
+            .retain(|chrom, _| chromosomes.contains(chrom));
+    }
+
     fn iter(&self) -> DataLoaderIter {
         DataLoaderIter {
             iter: PrefethIterator::new(
@@ -101,7 +125,7 @@ impl GenomeDataLoader {
                     batch_size: self.batch_size,
                     buffer_seq: VecDeque::new(),
                     buffer_data: VecDeque::new(),
-                    chunks: self.builder.iter_chunks(self.trim_target, false),
+                    chunks: self.builder.seq_index.iter_chunks(self.trim_target, false),
                 },
                 self.prefetch,
             ),
@@ -126,13 +150,19 @@ impl GenomeDataLoader {
         seq_as_string: bool,
         prefetch: usize,
     ) -> Result<Self> {
-        Ok(Self {
+        let mut loader = Self {
             builder: GenomeDataBuilder::open(location)?,
             batch_size,
-            trim_target,
+            trim_target: None,
             seq_as_string,
             prefetch,
-        })
+        };
+
+        if let Some(t) = trim_target {
+            loader.set_trim_target(t);
+        }
+
+        Ok(loader)
     }
 
     /** Returns the track names in the dataset.
@@ -158,8 +188,12 @@ impl GenomeDataLoader {
            A list of segment strings representing genomic ranges.
     */
     #[getter]
-    fn segments(&self) -> Vec<&String> {
-        self.builder.seq_index.keys().collect()
+    fn segments(&self) -> Vec<String> {
+        self.builder
+            .seq_index
+            .keys()
+            .map(|x| x.pretty_show())
+            .collect()
     }
 
     #[getter]
@@ -201,6 +235,51 @@ impl GenomeDataLoader {
     #[getter]
     fn data(slf: PyRef<'_, Self>) -> DataIndexer {
         DataIndexer(slf.into())
+    }
+
+    /** Creating a new genomic data loader based on specified regions.
+
+        This method allows you to subset the genomic data by intersecting it with
+        specified regions.
+        The dataset will be updated to only include the regions that intersect with the provided ones.
+
+        Parameters
+        ----------
+        regions : list[str]
+            A list of genomic ranges in string format (e.g., 'chr1:1000-2000').
+
+        Returns
+        -------
+        GenomeDataLoader
+            A new instance of `GenomeDataLoader` that contains only the data for the specified regions.
+    */
+    #[pyo3(
+        signature = (regions),
+        text_signature = "($self, regions)"
+    )]
+    fn intersection(&self, regions: Vec<String>) -> Self {
+        let mut loader = self.clone();
+        loader.intersect(
+            regions.into_iter().map(|r| {
+                GenomicRange::from_str(&r).expect(&format!("Invalid genomic range: {}", r))
+            }),
+        );
+        loader
+    }
+
+    /** Create a copy of the GenomeDataLoader.
+
+        This method creates a new instance of `GenomeDataLoader` with the same configuration
+        as the current instance. It is useful for creating independent copies of the loader
+        that can be modified without affecting the original.
+
+        Returns
+        -------
+        GenomeDataLoader
+            A new instance of `GenomeDataLoader` with the same configuration.
+    */
+    fn copy(&self) -> Self {
+        self.clone()
     }
 
     /** Plots the genomic signal for a specified region and tracks.
@@ -303,14 +382,14 @@ impl Iterator for DataLoaderIter {
     }
 }
 
-struct _DataLoaderIter {
+struct _DataLoaderIter<T> {
     batch_size: usize,
     buffer_seq: VecDeque<Array1<u8>>,
     buffer_data: VecDeque<ArrayD<f32>>,
-    chunks: DataChunkIter,
+    chunks: T,
 }
 
-impl Iterator for _DataLoaderIter {
+impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
     type Item = (Sequences, ArrayD<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -415,9 +494,9 @@ impl SeqIndexer {
         let (chunk, i) = py_ref
             .builder
             .seq_index
-            .get(key)
+            .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        Ok(DataChunk::open(chunk, false)?.get_seq_at(*i)?)
+        Ok(chunk.open(false)?.get_seq_at(*i)?)
     }
 }
 
@@ -446,9 +525,9 @@ impl DataIndexer {
         let (chunk, i) = py_ref
             .builder
             .seq_index
-            .get(key)
+            .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let vals = DataChunk::open(chunk, false)?.gets(j)?;
+        let vals = chunk.open(false)?.gets(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))
@@ -561,7 +640,7 @@ impl GenomeDataLoaderMap {
 
         if let Some(trim_target) = trim_target {
             loaders.values_mut().for_each(|loader| {
-                loader.trim_target = Some(trim_target);
+                loader.set_trim_target(trim_target);
             });
         }
 
@@ -572,6 +651,24 @@ impl GenomeDataLoaderMap {
         Ok(Self(
             loaders.into_iter().map(|(k, v)| (k, v.into())).collect(),
         ))
+    }
+
+    /** Returns a dictionary mapping dataset tags to the number of tracks.
+
+      Returns
+      -------
+      dict[str, int]
+          A dictionary where keys are dataset tags and values are the number of tracks.
+    */
+    #[getter]
+    fn n_tracks(&self, py: Python) -> IndexMap<String, usize> {
+        self.0
+            .iter()
+            .map(|(k, v)| {
+                let n_tracks = v.borrow(py).builder.tracks().unwrap().len();
+                (k.clone(), n_tracks)
+            })
+            .collect()
     }
 
     /** Returns the segments of the genome as a vector of strings.
@@ -588,13 +685,57 @@ impl GenomeDataLoaderMap {
             .builder
             .seq_index
             .keys()
-            .cloned()
+            .map(|x| x.pretty_show())
             .collect()
     }
 
+    /** batch size of the dataloader.
+     */
     #[getter]
     fn batch_size(&self, py: Python) -> usize {
         self.0[0].borrow(py).batch_size
+    }
+
+    /** Creates a new genomic data loader based on specified regions.
+
+       This method allows you to subset the genomic data by intersecting it with
+       specified regions across all loaders in the map.
+       The dataset will be updated to only include the regions that intersect with the provided ones.
+
+       Parameters
+       ----------
+       regions : list[str]
+           A list of genomic ranges in string format (e.g., 'chr1:1000-2000').
+
+       Returns
+       -------
+       GenomeDataLoaderMap
+           A new instance of `GenomeDataLoaderMap` that contains only the data for the specified regions.
+    */
+    fn intersection(&self, py: Python, regions: Vec<String>) -> Result<Self> {
+        let result = self.0.iter()
+            .map(|(tag, loader)| {
+                let new_loader = loader.borrow(py).intersection(regions.clone());
+                Ok((tag.clone(), new_loader.into_pyobject(py)?.into()))
+            })
+            .collect::<Result<IndexMap<_, _>>>();
+        Ok(Self(result?))
+    }
+
+    /** Returns the keys of the dataloader.
+
+       Returns
+       -------
+       list[str]
+           A list of keys representing the genomic segments in the dataset.
+    */
+    fn keys(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+
+    fn __len__(&self, py: Python) -> usize {
+        let n = self.0[0].borrow(py).builder.seq_index.len();
+        n / self.batch_size(py) + if n % self.batch_size(py) > 0 { 1 } else { 0 }
     }
 
     fn __iter__(slf: PyRef<'_, Self>, py: Python) -> MultiDataLoaderIter {

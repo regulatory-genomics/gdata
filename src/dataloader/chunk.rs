@@ -14,54 +14,22 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/** Represents an iterator over genomic data chunks, allowing for efficient traversal of genomic datasets.
-
-    This struct is used to iterate over genomic data chunks, providing access to each chunk's segments
-    and associated data. It supports operations like retrieving the next chunk and iterating over the keys.
-*/
-pub(crate) struct DataChunkIter {
-    pub(crate) root: PathBuf,
-    pub(crate) chroms: Box<dyn Iterator<Item = String> + Send + Sync>,
-    pub(crate) chunks: Box<dyn Iterator<Item = PathBuf> + Send + Sync>,
-    pub(crate) trim_target: Option<usize>,
-    pub(crate) mutable: bool,
-}
-
-impl Iterator for DataChunkIter {
-    type Item = DataChunk;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(path) = self.chunks.next() {
-            let mut chunk = DataChunk::open(path, self.mutable).unwrap();
-            if let Some(trim_target) = self.trim_target {
-                chunk.set_trim_target(trim_target);
-            }
-            Some(chunk)
-        } else {
-            let chr = self.chroms.next()?;
-            self.chunks = Box::new(
-                std::fs::read_dir(self.root.join(&chr))
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .sorted_by_key(|p| p.file_name().unwrap().to_string_lossy().parse::<usize>().unwrap())
-            );
-            self.next()
-        }
-    }
-}
-
 #[derive(Decode, Encode)]
 pub struct Values(#[bincode(with_serde)] pub ArrayD<bf16>);
 
 impl Values {
-    pub(super) fn iter_rows(&self) -> impl DoubleEndedIterator<Item = ArrayD<f32>> + '_ {
+    pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = ArrayD<f32>> + '_ {
         self.0
             .axis_iter(Axis(0))
             .map(|row| row.mapv(|x| x.to_f32()))
     }
 
+    pub fn select_rows(&self, indices: &[usize]) -> Self {
+        Values(self.0.select(Axis(0), indices))
+    }
+
     /// Perform in-place scaling and clamping on the values.
-    fn transform(&mut self, scale: Option<bf16>, clamp_max: Option<bf16>) {
+    pub fn transform(&mut self, scale: Option<bf16>, clamp_max: Option<bf16>) {
         self.0.map_inplace(|x| {
             if let Some(scale) = scale {
                 *x *= scale;
@@ -130,6 +98,10 @@ impl Sequences {
         self.0.axis_iter(Axis(0)).map(|row| row.to_owned())
     }
 
+    pub fn select_rows(&self, indices: &[usize]) -> Self {
+        Self(self.0.select(Axis(0), indices))
+    }
+
     pub fn into_strings(self) -> Vec<String> {
         self.0.rows()
             .into_iter()
@@ -159,10 +131,11 @@ impl Sequences {
 #[pyclass]
 #[derive(Debug)]
 pub struct DataChunk {
-    location: PathBuf,
-    pub(crate) segments: Vec<GenomicRange>,
-    trim_target: Option<usize>,
-    data_store: DataStore,
+    location: PathBuf,  // Path to the chunk's directory
+    pub(crate) segments: Vec<GenomicRange>,  // Genomic segments contained in this chunk
+    trim_target: Option<usize>,  // Output trimming
+    data_store: DataStore,  // Data store
+    subset: Option<Vec<usize>>,  // Optional indices representing a subset of the data
 }
 
 impl DataChunk {
@@ -178,6 +151,7 @@ impl DataChunk {
                 location.as_ref().join("data"),
                 std::iter::empty::<(_, String)>(),
             )?,
+            subset: None,
         })
     }
 
@@ -199,7 +173,29 @@ impl DataChunk {
             segments,
             trim_target: None,
             data_store: DataStore::open(store_path, writable)?,
+            subset: None,
         })
+    }
+
+    /// indices must be unique and sorted
+    pub(crate) fn subset(&mut self, indices: Vec<usize>) -> Result<()> {
+        if self.subset.is_some() {
+            bail!("Subset has already been set for this DataChunk");
+        }
+        if indices.is_empty() {
+            bail!("Cannot create subset with empty indices");
+        }
+
+        let segments: Vec<_> = indices
+            .iter()
+            .map(|&i| self.segments[i].clone())
+            .collect();
+        if segments.len() != self.segments.len() {
+            self.segments = segments;
+            self.subset = Some(indices);
+        }
+
+        Ok(())
     }
 
     pub fn set_trim_target(&mut self, trim_target: usize) {
@@ -216,11 +212,14 @@ impl DataChunk {
 
     pub fn get_seqs(&self) -> Result<Sequences> {
         let seq_file = self.location.join("sequence.dat");
-        let seqs = std::fs::read(seq_file)?;
-        Sequences::decode(&seqs)
+        let mut seqs = Sequences::decode(&std::fs::read(seq_file)?)?;
+        if let Some(idx) = self.subset.as_ref() {
+            seqs = seqs.select_rows(idx);
+        }
+        Ok(seqs)
     }
 
-    pub fn get_seq_at(&self, i: usize) -> Result<Array1<u8>> {
+    pub(crate) fn get_seq_at(&self, i: usize) -> Result<Array1<u8>> {
         if i >= self.segments.len() {
             bail!("Index out of bounds: {} >= {}", i, self.segments.len());
         }
@@ -233,20 +232,31 @@ impl DataChunk {
     }
 
     pub fn get(&mut self, key: &str) -> Result<Option<Values>> {
-        let data = self.data_store.read(key)?;
-        if let Some(trim_target) = self.trim_target {
-            Ok(data.map(|x| x.trim(trim_target)))
+        let result = if let Some(mut data) = self.data_store.read(key, self.trim_target)? {
+            if let Some(idx) = self.subset.as_ref() {
+                data = data.select_rows(idx);
+            }
+            Some(data)
         } else {
-            Ok(data)
-        }
+            None
+        };
+        Ok(result)
     }
 
     pub fn gets(&mut self, keys: &[String]) -> Result<Values> {
-        self.data_store.read_many(keys, self.trim_target)
+        let mut data = self.data_store.read_many(keys, self.trim_target)?;
+        if let Some(idx) = self.subset.as_ref() {
+            data = data.select_rows(idx);
+        }
+        Ok(data)
     }
 
     pub fn read_all(&mut self) -> Result<Values> {
-        self.data_store.read_all(self.trim_target)
+        let mut data = self.data_store.read_all(self.trim_target)?;
+        if let Some(idx) = self.subset.as_ref() {
+            data = data.select_rows(idx);
+        }
+        Ok(data)
     }
 
     pub fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
@@ -270,6 +280,7 @@ impl DataChunk {
         self.data_store.write_par(data)
     }
 }
+
 
 #[derive(Debug)]
 struct DataStore {
@@ -354,7 +365,7 @@ impl DataStore {
         })
     }
 
-    fn read(&mut self, key: &str) -> Result<Option<Values>> {
+    fn read(&mut self, key: &str, trim_target: Option<usize>) -> Result<Option<Values>> {
         if !self.index.contains_key(key) {
             return Ok(None);
         }
@@ -363,7 +374,11 @@ impl DataStore {
         self.file.seek(std::io::SeekFrom::Start(*offset as u64))?;
         let mut buffer = vec![0; *size];
         self.file.read_exact(&mut buffer)?;
-        Ok(Some(Values::decode(&buffer)?))
+        let mut data = Values::decode(&buffer)?;
+        if let Some(trim_target) = trim_target {
+            data = data.trim(trim_target);
+        }
+        Ok(Some(data))
     }
 
     fn read_many(&mut self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
