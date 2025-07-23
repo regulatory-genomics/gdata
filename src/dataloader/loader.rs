@@ -389,7 +389,9 @@ impl<T: Send + 'static> PrefethIterator<T> {
         let (sender, receiver) = sync_channel(buffer_size);
         std::thread::spawn(move || {
             for item in iter {
-                sender.send(item).unwrap();
+                if sender.send(item).is_err() {
+                    break;
+                }
             }
         });
         Self(Arc::new(Mutex::new(receiver)))
@@ -400,8 +402,7 @@ impl<T: Send + 'static> Iterator for PrefethIterator<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.0.lock().unwrap().recv().ok();
-        item
+        self.0.lock().unwrap().recv().ok()
     }
 }
 
@@ -603,6 +604,10 @@ impl GenomeDataLoaderMap {
             .map(|(tag, loader)| (tag.clone(), loader.borrow(py).iter()))
             .collect();
         MultiDataLoaderIter(iter)
+    }
+
+    fn __repr__(&self) -> String {
+        self.to_string()
     }
 }
 
