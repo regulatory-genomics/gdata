@@ -109,13 +109,26 @@ impl GenomeDataLoader {
         self.trim_target = Some(trim_target / self.builder.resolution as usize);
     }
 
-    pub fn intersect(&mut self, regions: impl Iterator<Item = GenomicRange>) {
-        let builder = &mut self.builder;
-        builder.seq_index = builder.seq_index.intersect(regions);
+    pub fn intersection(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
+        let mut new_loader = self.clone();
+        let builder = &mut new_loader.builder;
+        builder.seq_index = builder.seq_index.intersection(regions);
         let chromosomes = builder.seq_index.chromosomes().collect::<HashSet<_>>();
         builder
             .chrom_sizes
             .retain(|chrom, _| chromosomes.contains(chrom));
+        new_loader
+    }
+
+    pub fn difference(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
+        let mut new_loader = self.clone();
+        let builder = &mut new_loader.builder;
+        builder.seq_index = builder.seq_index.difference(regions);
+        let chromosomes = builder.seq_index.chromosomes().collect::<HashSet<_>>();
+        builder
+            .chrom_sizes
+            .retain(|chrom, _| chromosomes.contains(chrom));
+        new_loader
     }
 
     fn iter(&self) -> DataLoaderIter {
@@ -237,7 +250,7 @@ impl GenomeDataLoader {
         DataIndexer(slf.into())
     }
 
-    /** Creating a new genomic data loader based on specified regions.
+    /** Creating a new genomic data loader in which the regions intersect with the specified ones.
 
         This method allows you to subset the genomic data by intersecting it with
         specified regions.
@@ -248,23 +261,58 @@ impl GenomeDataLoader {
         regions : list[str]
             A list of genomic ranges in string format (e.g., 'chr1:1000-2000').
 
+        See Also
+        --------
+        difference : For creating a loader with differing regions.
+
         Returns
         -------
         GenomeDataLoader
             A new instance of `GenomeDataLoader` that contains only the data for the specified regions.
     */
     #[pyo3(
+        name = "intersection",
         signature = (regions),
         text_signature = "($self, regions)"
     )]
-    fn intersection(&self, regions: Vec<String>) -> Self {
-        let mut loader = self.clone();
-        loader.intersect(
+    fn intersection_py(&self, regions: Vec<String>) -> Self {
+        self.intersection(
             regions.into_iter().map(|r| {
                 GenomicRange::from_str(&r).expect(&format!("Invalid genomic range: {}", r))
             }),
-        );
-        loader
+        )
+    }
+
+    /** Creating a new genomic data loader in which the regions differ from the specified ones.
+      
+        This method allows you to subset the genomic data by removing the specified regions.
+
+        Parameters
+        ----------
+        regions : list[str]
+            A list of genomic ranges in string format (e.g., 'chr1:1000-2000').
+
+        See Also
+        --------
+        intersection : For creating a loader with intersecting regions.
+
+        Returns
+        -------
+        GenomeDataLoader
+            A new instance of `GenomeDataLoader` that contains only the data for the regions
+            that do not intersect with the specified ones.
+    */
+    #[pyo3(
+        name = "difference",
+        signature = (regions),
+        text_signature = "($self, regions)"
+    )]
+    fn difference_py(&self, regions: Vec<String>) -> Self {
+        self.difference(
+            regions.into_iter().map(|r| {
+                GenomicRange::from_str(&r).expect(&format!("Invalid genomic range: {}", r))
+            }),
+        )
     }
 
     /** Create a copy of the GenomeDataLoader.
@@ -712,10 +760,47 @@ impl GenomeDataLoaderMap {
        GenomeDataLoaderMap
            A new instance of `GenomeDataLoaderMap` that contains only the data for the specified regions.
     */
+    #[pyo3(
+        signature = (regions),
+        text_signature = "($self, regions)"
+    )]
     fn intersection(&self, py: Python, regions: Vec<String>) -> Result<Self> {
         let result = self.0.iter()
             .map(|(tag, loader)| {
-                let new_loader = loader.borrow(py).intersection(regions.clone());
+                let new_loader = loader.borrow(py).intersection_py(regions.clone());
+                Ok((tag.clone(), new_loader.into_pyobject(py)?.into()))
+            })
+            .collect::<Result<IndexMap<_, _>>>();
+        Ok(Self(result?))
+    }
+
+    /** Creating a new genomic data loader in which the regions differ from the specified ones.
+      
+        This method allows you to subset the genomic data by removing the specified regions.
+
+        Parameters
+        ----------
+        regions : list[str]
+            A list of genomic ranges in string format (e.g., 'chr1:1000-2000').
+
+        See Also
+        --------
+        intersection : For creating a loader with intersecting regions.
+
+        Returns
+        -------
+        GenomeDataLoader
+            A new instance of `GenomeDataLoader` that contains only the data for the regions
+            that do not intersect with the specified ones.
+    */
+    #[pyo3(
+        signature = (regions),
+        text_signature = "($self, regions)"
+    )]
+    fn difference(&self, py: Python, regions: Vec<String>) -> Result<Self> {
+        let result = self.0.iter()
+            .map(|(tag, loader)| {
+                let new_loader = loader.borrow(py).difference_py(regions.clone());
                 Ok((tag.clone(), new_loader.into_pyobject(py)?.into()))
             })
             .collect::<Result<IndexMap<_, _>>>();

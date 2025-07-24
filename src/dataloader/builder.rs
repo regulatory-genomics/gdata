@@ -31,6 +31,7 @@ use crate::w5z::W5Z;
 
     The builder creates a structured dataset in a specified location:
 
+    ```
     root/
     ├── metadata.json
     ├── chr1/
@@ -44,6 +45,7 @@ use crate::w5z::W5Z;
     |   |   ├── data.index
     │   │   ├── sequence.dat
     |   |   └── names.txt
+    ```
 
     Parameters
     ----------

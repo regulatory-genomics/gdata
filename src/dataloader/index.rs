@@ -45,7 +45,8 @@ impl ChunkIndex {
         self.0.get(key)
     }
 
-    pub fn intersect(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
+    /// Compute the intersection of the index with the given genomic regions.
+    pub fn intersection(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
         let interval_map: GIntervalMap<_> =
             self.0.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
         let index = regions
@@ -54,6 +55,19 @@ impl ChunkIndex {
             .map(|(a, b)| (a, b.clone()))
             .collect();
         Self(index)
+    }
+
+    /// Compute the difference of the index with the given genomic regions.
+    pub fn difference(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
+        let mut new_index = self.0.clone();
+        let interval_map: GIntervalMap<_> =
+            self.0.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+        regions.for_each(|region| {
+            interval_map.find(&region).for_each(|(a, _)| {
+                new_index.remove(&a);
+            })
+        });
+        Self(new_index)
     }
 
     pub fn iter_chunks(
