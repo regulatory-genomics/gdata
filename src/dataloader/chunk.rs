@@ -31,12 +31,16 @@ impl Values {
     /// Perform in-place scaling and clamping on the values.
     pub fn transform(&mut self, scale: Option<bf16>, clamp_max: Option<bf16>) {
         self.0.map_inplace(|x| {
-            if let Some(scale) = scale {
-                *x *= scale;
-            }
-            if let Some(clamp_max) = clamp_max {
-                if *x > clamp_max {
-                    *x = clamp_max;
+            if x.is_nan() {
+                *x = bf16::from_f32(0.0); // Replace NaN with 0.0
+            } else {
+                if let Some(scale) = scale {
+                    *x *= scale;
+                }
+                if let Some(clamp_max) = clamp_max {
+                    if *x > clamp_max {
+                        *x = clamp_max;
+                    }
                 }
             }
         })
@@ -75,7 +79,7 @@ impl Values {
 
     fn encode(self) -> Result<Vec<u8>> {
         let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
-        let data = zstd::bulk::Compressor::new(9)?.compress(&data)?;
+        let data = zstd::bulk::Compressor::new(7)?.compress(&data)?;
         Ok(data)
     }
 }
@@ -177,6 +181,10 @@ impl DataChunk {
         })
     }
 
+    pub fn set_trim_target(&mut self, trim_target: usize) {
+        self.trim_target = Some(trim_target);
+    }
+
     /// indices must be unique and sorted
     pub(crate) fn subset(&mut self, indices: Vec<usize>) -> Result<()> {
         if self.subset.is_some() {
@@ -196,10 +204,6 @@ impl DataChunk {
         }
 
         Ok(())
-    }
-
-    pub fn set_trim_target(&mut self, trim_target: usize) {
-        self.trim_target = Some(trim_target);
     }
 
     pub fn len(&self) -> usize {
@@ -268,7 +272,7 @@ impl DataChunk {
             .collect();
         let seqs = Sequences(Array2::from_shape_vec(shape, seqs?)?);
         let seqs = bincode::encode_to_vec::<_, Configuration>(seqs, Default::default())?;
-        let seqs = zstd::bulk::Compressor::new(9)?.compress(&seqs)?;
+        let seqs = zstd::bulk::Compressor::new(7)?.compress(&seqs)?;
         std::fs::write(self.location.join("sequence.dat"), seqs)?;
         Ok(())
     }

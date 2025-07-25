@@ -29,6 +29,19 @@ impl W5Z {
         Ok(arr)
     }
 
+    pub fn add(&self, key: &str, value: &[f32]) -> Result<()> {
+        let group = self.inner.group("/")?;
+        write_z(
+            &group,
+            key,
+            value,
+            &mut Some(false), // zfp is not set yet
+            0.0, // default precision
+            19, // default compression level
+        )?;
+        Ok(())
+    }
+
     pub fn contains(&self, key: &str) -> Result<bool> {
         let group = self.inner.group("/")?;
         match group.dataset(key) {
@@ -45,7 +58,7 @@ impl W5Z {
         signature = (filename, mode="r"),
         text_signature = "($self, filename, mode='r')"
     )]
-    fn new(filename: PathBuf, mode: &str) -> Result<Self> {
+    pub fn new(filename: PathBuf, mode: &str) -> Result<Self> {
         let inner = match mode {
             "r" => File::open(filename)?,
             "w" => {
@@ -75,16 +88,7 @@ impl W5Z {
     }
 
     fn __setitem__(&self, key: &str, value: PyReadonlyArray1<'_, f32>) -> Result<()> {
-        let group = self.inner.group("/")?;
-        write_z(
-            &group,
-            key,
-            value.as_slice()?,
-            &mut Some(false), // zfp is not set yet
-            0.0, // default precision
-            19, // default compression level
-        )?;
-        Ok(())
+        self.add(key, value.as_slice()?)
     }
 
     fn list_attrs(&self) -> Result<Vec<String>> {

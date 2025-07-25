@@ -6,6 +6,7 @@ use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayD};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -40,6 +41,11 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
         This is useful when you want to compute the loss on only the central part of the sequence.
         This is because the edges of the sequence may contain
         padding or other artifacts that should not be considered in the loss computation.
+    scale : Optional[float]
+        Scale the values by this factor. If not provided, no scaling is applied.
+    clamp_max : Optional[float]
+        Clamp the values to this maximum value. If not provided, no clamping is applied.
+        If `scale` is also provided, the clamping will be applied after scaling.
     seq_as_string : bool
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
@@ -71,6 +77,8 @@ pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
     batch_size: usize,
     trim_target: Option<usize>,
+    scale: Option<f32>,
+    clamp_max: Option<f32>,
     seq_as_string: bool,
     prefetch: usize,
 }
@@ -131,13 +139,15 @@ impl GenomeDataLoader {
         new_loader
     }
 
-    fn iter(&self) -> DataLoaderIter {
+    pub fn iter(&self) -> DataLoaderIter {
         DataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
                     batch_size: self.batch_size,
                     buffer_seq: VecDeque::new(),
                     buffer_data: VecDeque::new(),
+                    scale: self.scale.map(bf16::from_f32),
+                    clamp_max: self.clamp_max.map(bf16::from_f32),
                     chunks: self.builder.seq_index.iter_chunks(self.trim_target, false),
                 },
                 self.prefetch,
@@ -152,14 +162,16 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8, trim_target=None, seq_as_string=false, prefetch=16,
+            location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, seq_as_string=false, prefetch=16,
         ),
-        text_signature = "($self, location, *, batch_size=8, trim_target=None, seq_as_string=False, prefetch=16)"
+        text_signature = "($self, location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, seq_as_string=False, prefetch=16)"
     )]
     pub fn new(
         location: PathBuf,
         batch_size: usize,
         trim_target: Option<usize>,
+        scale: Option<f32>,
+        clamp_max: Option<f32>,
         seq_as_string: bool,
         prefetch: usize,
     ) -> Result<Self> {
@@ -167,6 +179,8 @@ impl GenomeDataLoader {
             builder: GenomeDataBuilder::open(location)?,
             batch_size,
             trim_target: None,
+            scale,
+            clamp_max,
             seq_as_string,
             prefetch,
         };
@@ -417,7 +431,7 @@ else:
 }
 
 #[pyclass]
-struct DataLoaderIter {
+pub struct DataLoaderIter {
     iter: PrefethIterator<(Sequences, ArrayD<f32>)>,
     seq_as_string: bool,
 }
@@ -434,7 +448,42 @@ struct _DataLoaderIter<T> {
     batch_size: usize,
     buffer_seq: VecDeque<Array1<u8>>,
     buffer_data: VecDeque<ArrayD<f32>>,
+    scale: Option<bf16>,
+    clamp_max: Option<bf16>,
     chunks: T,
+}
+
+impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
+    fn load_chunks(&mut self, n: usize) -> Option<usize> {
+        if n == 1 {
+            let mut chunk = self.chunks.next()?;
+            let seqs = chunk.get_seqs().unwrap();
+            let mut values = chunk.read_all().unwrap();
+            values.transform(self.scale, self.clamp_max);
+            self.buffer_seq.extend(seqs.iter_rows());
+            self.buffer_data.extend(values.iter_rows());
+            Some(1)
+        } else  {
+            let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next()).take(n).flatten().collect();
+            if chunks.is_empty() {
+                return None;
+            }
+
+            let data: Vec<_> = chunks.into_par_iter().map(|mut chunk| {
+                let seqs = chunk.get_seqs().unwrap();
+                let mut values = chunk.read_all().unwrap();
+                values.transform(self.scale, self.clamp_max);
+                (seqs, values)
+            }).collect();
+            let n_read = data.len();
+
+            data.into_iter().for_each(|(seqs, values)| {
+                self.buffer_seq.extend(seqs.iter_rows());
+                self.buffer_data.extend(values.iter_rows());
+            });
+            Some(n_read)
+        }
+    }
 }
 
 impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
@@ -445,7 +494,8 @@ impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
         if n_buffer < self.batch_size {
             if let Some(mut chunk) = self.chunks.next() {
                 let seqs = chunk.get_seqs().unwrap();
-                let values = chunk.read_all().unwrap();
+                let mut values = chunk.read_all().unwrap();
+                values.transform(self.scale, self.clamp_max);
                 self.buffer_seq.extend(seqs.iter_rows());
                 self.buffer_data.extend(values.iter_rows());
                 self.next()

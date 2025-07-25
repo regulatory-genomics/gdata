@@ -139,7 +139,7 @@ impl GenomeDataBuilder {
         ),
         text_signature = "($self, location, genome_fasta, *, segments=None, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None, overwrite=False)"
     )]
-    fn new(
+    pub fn new(
         location: PathBuf,
         genome_fasta: PathBuf,
         segments: Option<Vec<String>>,
@@ -354,7 +354,7 @@ impl GenomeDataBuilder {
         signature = (files),
         text_signature = "($self, files)",
     )]
-    fn add_files(&self, py: Python<'_>, files: IndexMap<String, PathBuf>) -> Result<()> {
+    pub fn add_files(&self, files: IndexMap<String, PathBuf>) -> Result<()> {
         let n_cols = self.window_size / self.resolution;
         files
             .into_iter()
@@ -364,7 +364,6 @@ impl GenomeDataBuilder {
                 let w5z = chunk
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
-                py.check_signals()?;
                 self.seq_index.iter_chunks(None, true)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
@@ -435,8 +434,8 @@ impl GenomeDataBuilder {
         signature = (key, w5z),
         text_signature = "($self, key, w5z)",
     )]
-    fn add_file(&self, py: Python<'_>, key: &str, w5z: PathBuf) -> Result<()> {
-        self.add_files(py, IndexMap::from([(key.to_string(), w5z)]))
+    pub fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
+        self.add_files(IndexMap::from([(key.to_string(), w5z)]))
     }
 }
 
