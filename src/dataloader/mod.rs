@@ -49,10 +49,7 @@ mod tests {
         fl
     }
 
-    fn build_genome(path: PathBuf) -> PathBuf {
-        let window_size = 128;
-        let resolution = 8;
-
+    fn build_genome(path: PathBuf, window_size: u64, resolution: u64) -> PathBuf {
         let w5z = make_w5z(path.join("data.w5z"));
         let fasta = make_fasta(path.join("genome.fa"));
         let builder = GenomeDataBuilder::new(
@@ -74,13 +71,27 @@ mod tests {
     #[test]
     fn test_genome_data_builder() {
         let temp_dir = tempfile::tempdir().unwrap();
-        build_genome(temp_dir.path().to_path_buf());
+        build_genome(temp_dir.path().to_path_buf(), 128, 8);
     }
 
     #[test]
-    fn test_genome_data_loader() {
+    fn test_genome_data_loader1() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let builder = build_genome(temp_dir.path().to_path_buf());
+        let builder = build_genome(temp_dir.path().to_path_buf(), 1, 1);
+        let loader =
+            GenomeDataLoader::new(builder.clone(), 1, None, None, None, false, 1).unwrap();
+
+        let values: Vec<_> = loader.iter().flat_map(|(_, v)| v.into_raw_vec_and_offset().0).collect();
+        let w5z = W5Z::open(temp_dir.path().join("data.w5z")).unwrap();
+        let truth: Vec<_> = w5z.get("chr1").unwrap().into_iter().chain(w5z.get("chr2").unwrap().into_iter()).collect();
+
+        assert_eq!(values, truth);
+    }
+
+    #[test]
+    fn test_genome_data_loader2() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let builder = build_genome(temp_dir.path().to_path_buf(), 128, 8);
 
         {
             let loader =

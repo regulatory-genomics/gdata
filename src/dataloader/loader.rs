@@ -3,7 +3,7 @@ use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array1, Array2, ArrayD};
+use ndarray::{Ix2, Array, Array1, Array2, ArrayD, Dimension};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -144,8 +144,8 @@ impl GenomeDataLoader {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
                     batch_size: self.batch_size,
-                    buffer_seq: VecDeque::new(),
-                    buffer_data: VecDeque::new(),
+                    buffer_seq: Buffer::new(),
+                    buffer_data: Buffer::new(),
                     scale: self.scale.map(bf16::from_f32),
                     clamp_max: self.clamp_max.map(bf16::from_f32),
                     chunks: self.builder.seq_index.iter_chunks(self.trim_target, false),
@@ -444,10 +444,90 @@ impl Iterator for DataLoaderIter {
     }
 }
 
+struct Buffer<T> {
+    data: VecDeque<Vec<T>>,
+    outer_idx: usize,
+    inner_idx: usize,
+    shape: Vec<usize>,
+    stride: usize,
+}
+
+impl<T: Clone> Buffer<T> {
+    fn new() -> Self {
+        Self {
+            data: VecDeque::new(),
+            outer_idx: 0,
+            inner_idx: 0,
+            shape: Vec::new(),
+            stride: 1,
+        }
+    }
+
+    fn len(&self) -> usize {
+        let n = self.data.iter().map(|d| d.len()).sum::<usize>();
+        n / self.stride
+    }
+
+    fn add<D: Dimension>(&mut self, item: Array<T, D>) {
+        if self.shape.is_empty() {
+            self.shape = item.shape()[1..].to_vec();
+            self.stride = self.shape.iter().product();
+        }
+        let (data, offset) = item.into_raw_vec_and_offset();
+        assert!(offset.unwrap_or(0) == 0, "Buffer does not support non-zero offset");
+        self.data.push_back(data);
+    }
+
+    fn take(&mut self, n: usize) -> Option<ArrayD<T>> {
+        let n = self.stride * n;
+        if self.outer_idx >= self.data.len() {
+            return None;
+        }
+
+        let mut result = Vec::with_capacity(n);
+        while result.len() < n && self.outer_idx < self.data.len() {
+            let inner_data = &self.data[self.outer_idx];
+            let remaining = inner_data.len() - self.inner_idx;
+            if remaining == 0 {
+                self.outer_idx += 1;
+                self.inner_idx = 0;
+                continue;
+            }
+
+            let take_count = remaining.min(n - result.len());
+            result.extend_from_slice(&inner_data[self.inner_idx..self.inner_idx + take_count]);
+            self.inner_idx += take_count;
+
+            if self.inner_idx >= inner_data.len() {
+                self.inner_idx = 0;
+                self.data.pop_front();
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            let shape = std::iter::once(result.len() / self.stride).chain(self.shape.iter().cloned())
+                .collect::<Vec<_>>();
+            Some(ArrayD::from_shape_vec(shape, result).unwrap())
+        }
+    }
+
+    fn take_all(&mut self) -> ArrayD<T> {
+        let n = self.len() / self.stride;
+        let data: Vec<_> = self.data.drain(..).flatten().collect();
+        let shape = std::iter::once(n).chain(self.shape.iter().cloned())
+            .collect::<Vec<_>>();
+        self.inner_idx = 0;
+        self.outer_idx = 0;
+        ArrayD::from_shape_vec(shape, data).unwrap()
+    }
+}
+
 struct _DataLoaderIter<T> {
     batch_size: usize,
-    buffer_seq: VecDeque<Array1<u8>>,
-    buffer_data: VecDeque<ArrayD<f32>>,
+    buffer_seq: Buffer<u8>,
+    buffer_data: Buffer<f32>,
     scale: Option<bf16>,
     clamp_max: Option<bf16>,
     chunks: T,
@@ -460,8 +540,8 @@ impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
             let seqs = chunk.get_seqs().unwrap();
             let mut values = chunk.read_all().unwrap();
             values.transform(self.scale, self.clamp_max);
-            self.buffer_seq.extend(seqs.iter_rows());
-            self.buffer_data.extend(values.iter_rows());
+            self.buffer_seq.add(seqs.0);
+            self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
             Some(1)
         } else  {
             let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next()).take(n).flatten().collect();
@@ -478,8 +558,8 @@ impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
             let n_read = data.len();
 
             data.into_iter().for_each(|(seqs, values)| {
-                self.buffer_seq.extend(seqs.iter_rows());
-                self.buffer_data.extend(values.iter_rows());
+                self.buffer_seq.add(seqs.0);
+                self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
             });
             Some(n_read)
         }
@@ -492,44 +572,25 @@ impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
     fn next(&mut self) -> Option<Self::Item> {
         let n_buffer = self.buffer_seq.len();
         if n_buffer < self.batch_size {
-            if let Some(mut chunk) = self.chunks.next() {
-                let seqs = chunk.get_seqs().unwrap();
-                let mut values = chunk.read_all().unwrap();
-                values.transform(self.scale, self.clamp_max);
-                self.buffer_seq.extend(seqs.iter_rows());
-                self.buffer_data.extend(values.iter_rows());
+            if let Some(_) = self.load_chunks(4) {
                 self.next()
             } else {
                 if n_buffer == 0 {
                     None
                 } else {
-                    let r = self.buffer_seq.len();
-                    let c = self.buffer_seq[0].len();
-                    let seqs = self.buffer_seq.drain(..).flatten().collect::<Vec<_>>();
-                    let seqs = Array2::from_shape_vec((r, c), seqs).unwrap();
-                    let mut shape: Vec<_> = self.buffer_data[0].shape().to_vec();
-                    shape.insert(0, r);
-                    let data = self.buffer_data.drain(..).flatten().collect::<Vec<_>>();
-                    let data = ArrayD::from_shape_vec(shape, data).unwrap();
+                    let seqs = self.buffer_seq.take_all().into_dimensionality::<Ix2>().unwrap();
+                    let data = self.buffer_data.take_all();
                     Some((Sequences(seqs), data))
                 }
             }
         } else {
-            let c = self.buffer_seq[0].len();
             let seqs = self
                 .buffer_seq
-                .drain(..self.batch_size)
-                .flatten()
-                .collect::<Vec<_>>();
-            let seqs = Array2::from_shape_vec((self.batch_size, c), seqs).unwrap();
-            let mut shape = self.buffer_data[0].shape().to_vec();
-            shape.insert(0, self.batch_size);
+                .take(self.batch_size).unwrap().into_dimensionality::<Ix2>().unwrap();
             let data = self
                 .buffer_data
-                .drain(..self.batch_size)
-                .flatten()
-                .collect::<Vec<_>>();
-            let data = ArrayD::from_shape_vec(shape, data).unwrap();
+                .take(self.batch_size)
+                .unwrap();
             Some((Sequences(seqs), data))
         }
     }
