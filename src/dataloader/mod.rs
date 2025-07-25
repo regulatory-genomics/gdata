@@ -4,7 +4,7 @@ mod index;
 mod loader;
 
 pub use builder::GenomeDataBuilder;
-pub use loader::{GenomeDataLoader, GenomeDataLoaderMap};
+pub use loader::{GenomeDataLoader, GenomeDataLoaderMap, CatGenomeDataLoader};
 
 #[cfg(test)]
 mod tests {

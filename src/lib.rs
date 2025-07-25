@@ -16,6 +16,7 @@ fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<dataloader::GenomeDataBuilder>()?;
     m.add_class::<dataloader::GenomeDataLoader>()?;
     m.add_class::<dataloader::GenomeDataLoaderMap>()?;
+    m.add_class::<dataloader::CatGenomeDataLoader>()?;
 
     m.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, m)?)?;
 

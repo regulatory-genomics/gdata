@@ -15,6 +15,7 @@ Core Classes
 
     GenomeDataLoader
     GenomeDataLoaderMap
+    CatGenomeDataLoader
     GenomeDataBuilder
 
 Utilities

@@ -3,7 +3,7 @@ use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Ix2, Array, Array1, Array2, ArrayD, Dimension};
+use ndarray::{Ix2, Array, Array1, ArrayD, Dimension};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -105,6 +105,11 @@ impl std::fmt::Display for GenomeDataLoader {
 }
 
 impl GenomeDataLoader {
+    pub fn len(&self) -> usize {
+        let n = self.builder.seq_index.len();
+        n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
+    }
+
     pub fn set_trim_target(&mut self, trim_target: usize) {
         if trim_target >= self.builder.window_size as usize {
             panic!("Trim target must be less than window size");
@@ -417,8 +422,7 @@ else:
     }
 
     fn __len__(&self) -> usize {
-        let n = self.builder.seq_index.len();
-        n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
+        self.len()
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> DataLoaderIter {
@@ -749,7 +753,8 @@ impl DataIndexer {
     GenomeDataBuilder
 */
 #[pyclass]
-pub struct GenomeDataLoaderMap(IndexMap<String, Py<GenomeDataLoader>>);
+#[derive(Debug, Clone)]
+pub struct GenomeDataLoaderMap(IndexMap<String, GenomeDataLoader>);
 
 impl std::fmt::Display for GenomeDataLoaderMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -759,6 +764,21 @@ impl std::fmt::Display for GenomeDataLoaderMap {
             self.0.keys().map(|x| "'".to_owned() + x + "'").join(", "),
         )?;
         Ok(())
+    }
+}
+
+impl GenomeDataLoaderMap {
+    pub fn len(&self) -> usize {
+        self.0[0].len()
+    }
+
+    pub fn iter(&self) -> MultiDataLoaderIter {
+        let iter = self
+            .0
+            .iter()
+            .map(|(tag, loader)| (tag.clone(), loader.iter()))
+            .collect();
+        MultiDataLoaderIter(iter)
     }
 }
 
@@ -772,7 +792,7 @@ impl GenomeDataLoaderMap {
         text_signature = "($self, loaders, *, batch_size=None, trim_target=None, seq_as_string=False)"
     )]
     pub fn new(
-        mut loaders: IndexMap<String, PyRefMut<'_, GenomeDataLoader>>,
+        mut loaders: IndexMap<String, GenomeDataLoader>,
         batch_size: Option<usize>,
         trim_target: Option<usize>,
         seq_as_string: bool,
@@ -808,7 +828,7 @@ impl GenomeDataLoaderMap {
         });
 
         Ok(Self(
-            loaders.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            loaders.into_iter().map(|(k, v)| (k, v)).collect(),
         ))
     }
 
@@ -820,11 +840,11 @@ impl GenomeDataLoaderMap {
           A dictionary where keys are dataset tags and values are the number of tracks.
     */
     #[getter]
-    fn n_tracks(&self, py: Python) -> IndexMap<String, usize> {
+    fn n_tracks(&self) -> IndexMap<String, usize> {
         self.0
             .iter()
             .map(|(k, v)| {
-                let n_tracks = v.borrow(py).builder.tracks().unwrap().len();
+                let n_tracks = v.builder.tracks().unwrap().len();
                 (k.clone(), n_tracks)
             })
             .collect()
@@ -838,9 +858,8 @@ impl GenomeDataLoaderMap {
            A list of segment strings representing genomic ranges.
     */
     #[getter]
-    fn segments(&self, py: Python) -> Vec<String> {
+    fn segments(&self) -> Vec<String> {
         self.0[0]
-            .borrow(py)
             .builder
             .seq_index
             .keys()
@@ -851,8 +870,8 @@ impl GenomeDataLoaderMap {
     /** batch size of the dataloader.
      */
     #[getter]
-    fn batch_size(&self, py: Python) -> usize {
-        self.0[0].borrow(py).batch_size
+    fn batch_size(&self) -> usize {
+        self.0[0].batch_size
     }
 
     /** Creates a new genomic data loader based on specified regions.
@@ -875,11 +894,11 @@ impl GenomeDataLoaderMap {
         signature = (regions),
         text_signature = "($self, regions)"
     )]
-    fn intersection(&self, py: Python, regions: Vec<String>) -> Result<Self> {
+    fn intersection(&self, regions: Vec<String>) -> Result<Self> {
         let result = self.0.iter()
             .map(|(tag, loader)| {
-                let new_loader = loader.borrow(py).intersection_py(regions.clone());
-                Ok((tag.clone(), new_loader.into_pyobject(py)?.into()))
+                let new_loader = loader.intersection_py(regions.clone());
+                Ok((tag.clone(), new_loader))
             })
             .collect::<Result<IndexMap<_, _>>>();
         Ok(Self(result?))
@@ -908,11 +927,11 @@ impl GenomeDataLoaderMap {
         signature = (regions),
         text_signature = "($self, regions)"
     )]
-    fn difference(&self, py: Python, regions: Vec<String>) -> Result<Self> {
+    fn difference(&self, regions: Vec<String>) -> Result<Self> {
         let result = self.0.iter()
             .map(|(tag, loader)| {
-                let new_loader = loader.borrow(py).difference_py(regions.clone());
-                Ok((tag.clone(), new_loader.into_pyobject(py)?.into()))
+                let new_loader = loader.difference_py(regions.clone());
+                Ok((tag.clone(), new_loader))
             })
             .collect::<Result<IndexMap<_, _>>>();
         Ok(Self(result?))
@@ -929,18 +948,12 @@ impl GenomeDataLoaderMap {
         self.0.keys().cloned().collect()
     }
 
-    fn __len__(&self, py: Python) -> usize {
-        let n = self.0[0].borrow(py).builder.seq_index.len();
-        n / self.batch_size(py) + if n % self.batch_size(py) > 0 { 1 } else { 0 }
+    fn __len__(&self) -> usize {
+        self.len()
     }
 
-    fn __iter__(slf: PyRef<'_, Self>, py: Python) -> MultiDataLoaderIter {
-        let iter = slf
-            .0
-            .iter()
-            .map(|(tag, loader)| (tag.clone(), loader.borrow(py).iter()))
-            .collect();
-        MultiDataLoaderIter(iter)
+    fn __iter__(slf: PyRef<'_, Self>) -> MultiDataLoaderIter {
+        slf.iter()
     }
 
     fn __repr__(&self) -> String {
@@ -992,6 +1005,109 @@ impl MultiDataLoaderIter {
             .collect::<IndexMap<_, _>>();
 
         let result = if slf.0[0].seq_as_string {
+            (seq.into_strings(), values).into_pyobject(py).unwrap()
+        } else {
+            (seq, values).into_pyobject(py).unwrap()
+        };
+        Some(result)
+    }
+}
+
+/** This class combines multiple `GenomeDataLoaderMap` instances into a single loader.
+
+    It allows for the simultaneous loading of genomic data from multiple species.
+
+    Parameters
+    ----------
+    loaders: list[GenomeDataLoaderMap]
+        A list of `GenomeDataLoaderMap` instances to combine.
+*/
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct CatGenomeDataLoader(Vec<GenomeDataLoaderMap>);
+
+impl CatGenomeDataLoader {
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|loader| loader.len()).sum()
+    }
+
+    pub fn iter(&self) -> MultiGenomeIter {
+        let iters = self
+            .0
+            .iter()
+            .map(|loader| loader.iter())
+            .collect::<Vec<_>>();
+        MultiGenomeIter { iters, pos: 0 }
+    }
+}
+
+#[pymethods]
+impl CatGenomeDataLoader {
+    #[new]
+    #[pyo3(
+        signature = (loaders),
+        text_signature = "($self, loaders)"
+    )]
+    pub fn new(loaders: Vec<GenomeDataLoaderMap>) -> Result<Self> {
+        ensure!(
+            !loaders.is_empty(),
+            "At least one GenomeDataLoaderMap must be provided"
+        );
+
+        Ok(Self(loaders))
+    }
+
+    fn __len__(&self) -> usize {
+        self.len()
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> MultiGenomeIter {
+        slf.iter()
+    }
+}
+
+#[pyclass]
+pub struct MultiGenomeIter {
+    iters: Vec<MultiDataLoaderIter>,
+    pos: usize,
+}
+
+impl Iterator for MultiGenomeIter {
+    type Item = (Sequences, IndexMap<String, ArrayD<f32>>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.iters.is_empty() {
+            return None;
+        }
+
+        self.pos %= self.iters.len();
+        if let Some(item) = self.iters[self.pos].next() {
+            self.pos += 1;
+            Some(item)
+        } else {
+            self.iters.remove(self.pos);
+            self.next()
+        }
+    }
+}
+
+#[pymethods]
+impl MultiGenomeIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        py: Python<'a>,
+    ) -> Option<Bound<'a, pyo3::types::PyTuple>> {
+        let (seq, values) = slf.next()?;
+        let values = values
+            .into_iter()
+            .map(|(tag, v)| (tag, PyArrayDyn::from_owned_array(py, v)))
+            .collect::<IndexMap<_, _>>();
+
+        let result = if slf.iters[0].0[0].seq_as_string {
             (seq.into_strings(), values).into_pyobject(py).unwrap()
         } else {
             (seq, values).into_pyobject(py).unwrap()
