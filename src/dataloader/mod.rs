@@ -78,8 +78,8 @@ mod tests {
     fn test_genome_data_loader1() {
         let temp_dir = tempfile::tempdir().unwrap();
         let builder = build_genome(temp_dir.path().to_path_buf(), 1, 1);
-        let loader =
-            GenomeDataLoader::new(builder.clone(), 1, None, None, None, false, 1).unwrap();
+        let mut loader =
+            GenomeDataLoader::new(builder.clone(), 1, None, None, None, false, false, 1, 0).unwrap();
 
         let values: Vec<_> = loader.iter().flat_map(|(_, v)| v.into_raw_vec_and_offset().0).collect();
         let w5z = W5Z::open(temp_dir.path().join("data.w5z")).unwrap();
@@ -94,8 +94,8 @@ mod tests {
         let builder = build_genome(temp_dir.path().to_path_buf(), 128, 8);
 
         {
-            let loader =
-                GenomeDataLoader::new(builder.clone(), 1, None, None, None, false, 1).unwrap();
+            let mut loader =
+                GenomeDataLoader::new(builder.clone(), 1, None, None, None, false, false, 1, 0).unwrap();
             for (i, (_, v)) in loader.iter().enumerate() {
                 let (v, _) = v.into_raw_vec_and_offset();
                 assert!(v.len() == 128 / 8);
@@ -107,8 +107,8 @@ mod tests {
             }
         }
         {
-            let loader =
-                GenomeDataLoader::new(builder.clone(), 1, None, Some(2.0), Some(4.0), false, 1)
+            let mut loader =
+                GenomeDataLoader::new(builder.clone(), 1, None, Some(2.0), Some(4.0), false, false, 1, 0)
                     .unwrap();
             for (i, (_, v)) in loader.iter().enumerate() {
                 let (v, _) = v.into_raw_vec_and_offset();

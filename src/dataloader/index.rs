@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bed_utils::bed::{map::GIntervalMap, GenomicRange};
 use itertools::Itertools;
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -70,12 +71,13 @@ impl ChunkIndex {
         Self(new_index)
     }
 
-    pub fn iter_chunks(
+    pub fn iter_chunks<R: Rng>(
         &self,
         trim_target: Option<usize>,
         write: bool,
+        shuffle: Option<&mut R>,
     ) -> impl Iterator<Item = DataChunk> {
-        let chunks: Vec<_> = self
+        let mut chunks: Vec<_> = self
             .0
             .values()
             .sorted()
@@ -86,6 +88,9 @@ impl ChunkIndex {
                 (chunk, idx)
             })
             .collect();
+        if let Some(rng) = shuffle {
+            chunks.shuffle(rng);
+        }
         chunks.into_iter().map(move |(chunk, idx)| {
             let mut chunk = chunk.open(write).unwrap();
             chunk.subset(idx).unwrap();

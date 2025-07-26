@@ -6,6 +6,8 @@ use itertools::Itertools;
 use ndarray::{Ix2, Array, Array1, ArrayD, Dimension};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
+use rand::SeedableRng;
+use rand_chacha::ChaCha12Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -46,6 +48,8 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
     clamp_max : Optional[float]
         Clamp the values to this maximum value. If not provided, no clamping is applied.
         If `scale` is also provided, the clamping will be applied after scaling.
+    shuffle : bool
+        If True, the data will be shuffled before being returned. Default is False.
     seq_as_string : bool
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
@@ -54,6 +58,8 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
         The number of batches to prefetch for efficient data loading.
         This allows for asynchronous loading of data, improving performance during training or inference.
         But it will increase memory usage, so it should be set according to the available resources.
+    random_seed : int
+        The random seed for shuffling the data. Default is 2025.
 
     See Also
     --------
@@ -79,8 +85,10 @@ pub struct GenomeDataLoader {
     trim_target: Option<usize>,
     scale: Option<f32>,
     clamp_max: Option<f32>,
+    shuffle: bool,
     seq_as_string: bool,
     prefetch: usize,
+    rng: ChaCha12Rng,
 }
 
 impl std::fmt::Display for GenomeDataLoader {
@@ -144,7 +152,12 @@ impl GenomeDataLoader {
         new_loader
     }
 
-    pub fn iter(&self) -> DataLoaderIter {
+    pub fn iter(&mut self) -> DataLoaderIter {
+        let shuffle = if self.shuffle {
+            Some(&mut self.rng)
+        } else {
+            None
+        };
         DataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
@@ -153,7 +166,7 @@ impl GenomeDataLoader {
                     buffer_data: Buffer::new(),
                     scale: self.scale.map(bf16::from_f32),
                     clamp_max: self.clamp_max.map(bf16::from_f32),
-                    chunks: self.builder.seq_index.iter_chunks(self.trim_target, false),
+                    chunks: self.builder.seq_index.iter_chunks(self.trim_target, false, shuffle),
                 },
                 self.prefetch,
             ),
@@ -167,9 +180,9 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (
-            location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, seq_as_string=false, prefetch=16,
+            location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, shuffle=false, seq_as_string=false, prefetch=16, random_seed=2025,
         ),
-        text_signature = "($self, location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, seq_as_string=False, prefetch=16)"
+        text_signature = "($self, location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, shuffle=False, seq_as_string=False, prefetch=16, random_seed=2025)"
     )]
     pub fn new(
         location: PathBuf,
@@ -177,8 +190,10 @@ impl GenomeDataLoader {
         trim_target: Option<usize>,
         scale: Option<f32>,
         clamp_max: Option<f32>,
+        shuffle: bool,
         seq_as_string: bool,
         prefetch: usize,
+        random_seed: u64,
     ) -> Result<Self> {
         let mut loader = Self {
             builder: GenomeDataBuilder::open(location)?,
@@ -186,8 +201,10 @@ impl GenomeDataLoader {
             trim_target: None,
             scale,
             clamp_max,
+            shuffle,
             seq_as_string,
             prefetch,
+            rng: ChaCha12Rng::seed_from_u64(random_seed),
         };
 
         if let Some(t) = trim_target {
@@ -402,7 +419,6 @@ for i, (ax, signal) in enumerate(zip(axes, signal_values)):
     ax.fill_between(range(n_points), 0, signal, color='black')
     if highlight_start is not None:
         ax.axvspan(highlight_start, n_points-highlight_start, color='red', alpha=0.2)
-    #ax.set_ylabel('signal', rotation=0, labelpad=20, va='center', ha='right')
     ax.set_title(track_names[i], fontsize=7)
     ax.spines[['top', 'right']].set_visible(False)
 
@@ -421,11 +437,85 @@ else:
         Ok(())
     }
 
+    #[pyo3(
+        signature = (*, bins=10000, limit=100, min=None, log=false, savefig=None),
+        text_signature = "($self, *, bins=10000, limit=100, min=None, log=False, savefig=None)"
+    )]
+    fn hist(
+        mut slf: PyRefMut<'_, Self>,
+        py: Python<'_>,
+        bins: usize,
+        limit: usize,
+        min: Option<f32>,
+        log: bool,
+        savefig: Option<PathBuf>,
+    ) -> Vec<((f32, f32), usize)> {
+        let (lo, hi) = slf.iter().take(limit).flat_map(|(_, values)| 
+            values.into_iter().flat_map(|mut x| {
+                if min.is_some() && x < min.unwrap() {
+                    None
+                } else {
+                    if log {
+                        x = (x+1.0).ln();
+                    }
+                    Some(x)
+                }
+            })
+        ).minmax().into_option().unwrap();
+
+        let bin_size = (hi - lo) / bins as f32;
+        let mut histogram = vec![0; bins];
+        slf.iter().take(limit).for_each(|(_, values)| {
+            for mut value in values.into_iter() {
+                if min.is_some() && value < min.unwrap() {
+                    continue;
+                }
+                if log {
+                    value = (value + 1.0).ln();
+                }
+                let bin_index = ((value - lo) / bin_size).floor() as usize;
+                if bin_index < bins {
+                    histogram[bin_index] += 1;
+                }
+            }
+        });
+
+        let result: Vec<_> = histogram.into_iter().enumerate().flat_map(|(i, count)| {
+            if count == 0 {
+                None
+            } else {
+                let bin_start = lo + i as f32 * bin_size;
+                let bin_end = bin_start + bin_size;
+                Some(((bin_start, bin_end), count))
+            }
+        }).collect();
+
+        let (xs, ys): (Vec<_>, Vec<_>) = result.iter().map(|((x1, x2), y)| ((x1 + x2) / 2.0, *y)).unzip();
+
+        let py_code = r#"
+from matplotlib import pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.plot(xs, ys, 'b-')
+if log:
+    ax.set_xlabel("log(value + 1)")
+else:
+    ax.set_xlabel("value")
+plt.tight_layout()
+if savefig is None:
+    plt.show()
+else:
+    plt.savefig(savefig, dpi=300, bbox_inches='tight')
+"#;
+        py_run!(py, xs ys log savefig, py_code);
+        result
+    }
+
     fn __len__(&self) -> usize {
         self.len()
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> DataLoaderIter {
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> DataLoaderIter {
         slf.iter()
     }
 
@@ -772,10 +862,10 @@ impl GenomeDataLoaderMap {
         self.0[0].len()
     }
 
-    pub fn iter(&self) -> MultiDataLoaderIter {
+    pub fn iter(&mut self) -> MultiDataLoaderIter {
         let iter = self
             .0
-            .iter()
+            .iter_mut()
             .map(|(tag, loader)| (tag.clone(), loader.iter()))
             .collect();
         MultiDataLoaderIter(iter)
@@ -952,7 +1042,7 @@ impl GenomeDataLoaderMap {
         self.len()
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> MultiDataLoaderIter {
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> MultiDataLoaderIter {
         slf.iter()
     }
 
@@ -1031,10 +1121,10 @@ impl CatGenomeDataLoader {
         self.0.iter().map(|loader| loader.len()).sum()
     }
 
-    pub fn iter(&self) -> MultiGenomeIter {
+    pub fn iter(&mut self) -> MultiGenomeIter {
         let iters = self
             .0
-            .iter()
+            .iter_mut()
             .map(|loader| loader.iter())
             .collect::<Vec<_>>();
         MultiGenomeIter { iters, pos: 0 }
@@ -1057,11 +1147,27 @@ impl CatGenomeDataLoader {
         Ok(Self(loaders))
     }
 
+    /** Returns a dictionary mapping dataset tags to the number of tracks.
+
+      Returns
+      -------
+      dict[str, int]
+          A dictionary where keys are dataset tags and values are the number of tracks.
+    */
+    #[getter]
+    fn n_tracks(&self) -> IndexMap<String, usize> {
+        IndexMap::from_iter(
+            self.0
+                .iter()
+                .flat_map(|loader| loader.n_tracks().into_iter())
+        )
+    }
+
     fn __len__(&self) -> usize {
         self.len()
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> MultiGenomeIter {
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> MultiGenomeIter {
         slf.iter()
     }
 }
