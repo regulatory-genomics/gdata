@@ -1111,6 +1111,10 @@ impl MultiDataLoaderIter {
     ----------
     loaders: list[GenomeDataLoaderMap]
         A list of `GenomeDataLoaderMap` instances to combine.
+    batch_size : Optional[int]
+        Optional parameter to specify the batch size for loading genomic sequences.
+    shuffle : Optional[bool]
+        Optional parameter to specify whether to shuffle the data across all loaders.
 */
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -1135,14 +1139,26 @@ impl CatGenomeDataLoader {
 impl CatGenomeDataLoader {
     #[new]
     #[pyo3(
-        signature = (loaders),
-        text_signature = "($self, loaders)"
+        signature = (loaders, *, batch_size=None, shuffle=None),
+        text_signature = "($self, loaders, *, batch_size=None, shuffle=None)"
     )]
-    pub fn new(loaders: Vec<GenomeDataLoaderMap>) -> Result<Self> {
+    pub fn new(mut loaders: Vec<GenomeDataLoaderMap>, batch_size: Option<usize>, shuffle: Option<bool>) -> Result<Self> {
         ensure!(
             !loaders.is_empty(),
             "At least one GenomeDataLoaderMap must be provided"
         );
+
+        if let Some(bs) = batch_size {
+            loaders.iter_mut().for_each(|loader| {
+                loader.0.values_mut().for_each(|l| l.batch_size = bs);
+            });
+        }
+
+        if let Some(shuffle) = shuffle {
+            loaders.iter_mut().for_each(|loader| {
+                loader.0.values_mut().for_each(|l| l.shuffle = shuffle);
+            });
+        }
 
         Ok(Self(loaders))
     }
