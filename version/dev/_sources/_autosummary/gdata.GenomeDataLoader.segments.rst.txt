@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.segments
+===============================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.segments

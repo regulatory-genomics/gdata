@@ -1,0 +1,6 @@
+gdata.utils.W5Z.list\_attrs
+===========================
+
+.. currentmodule:: gdata.utils
+
+.. automethod:: W5Z.list_attrs
