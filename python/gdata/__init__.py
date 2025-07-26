@@ -1,5 +1,5 @@
 from . import utils
-from gdata._gdata import GenomeDataBuilder, GenomeDataLoader, GenomeDataLoaderMap, __version__
+from gdata._gdata import GenomeDataBuilder, GenomeDataLoader, GenomeDataLoaderMap, CatGenomeDataLoader, __version__
 
 import sys
 import logging
