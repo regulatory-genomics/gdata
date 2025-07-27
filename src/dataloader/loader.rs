@@ -803,7 +803,10 @@ impl<T: Send + 'static> PrefethIterator<T> {
         let (sender, receiver) = sync_channel(buffer_size);
         std::thread::spawn(move || {
             for item in iter {
-                sender.send(item).unwrap();
+                if sender.send(item).is_err() {
+                    // If the receiver is dropped, we stop sending more items.
+                    break;
+                }
             }
         });
         Self(Arc::new(Mutex::new(receiver)))
