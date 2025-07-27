@@ -14,7 +14,10 @@ mod tests {
 
     use super::*;
     use crate::w5z::W5Z;
-    use rand::distr::{Distribution, Uniform};
+    use rand::{
+        distr::{Distribution, Uniform},
+        Rng,
+    };
     use std::io::Write;
 
     fn assert_almost_equal(a: &[f32], b: &[f32], tolerance: f32) {
@@ -68,34 +71,40 @@ mod tests {
         fl
     }
 
-    fn make_fasta(fl: PathBuf) -> PathBuf {
+    fn rand_dna(length: usize) -> String {
+        let charset = "ACGT";
+        let mut rng = rand::rng();
+        let mut random_string = String::new();
+
+        for _ in 0..length {
+            let random_index = rng.random_range(0..charset.len());
+            let random_char = charset.chars().nth(random_index).unwrap(); // .unwrap() is safe here as index is within bounds
+            random_string.push(random_char);
+        }
+        random_string
+    }
+
+    fn make_fasta(fl: PathBuf) -> String {
+        let chr1 = rand_dna(8 * 128);
+        let chr2 = rand_dna(7919);
         let writer = std::fs::File::create(&fl).unwrap();
         let mut writer = std::io::BufWriter::new(writer);
         writeln!(writer, ">chr1").unwrap();
-        writeln!(
-            writer,
-            "{}",
-            &std::iter::repeat_n('C', 8 * 128).collect::<String>()
-        )
-        .unwrap();
+        writeln!(writer, "{}", &chr1).unwrap();
 
         writeln!(writer, ">chr2").unwrap();
-        writeln!(
-            writer,
-            "{}",
-            &std::iter::repeat_n('A', 7919).collect::<String>()
-        )
-        .unwrap();
-        fl
+        writeln!(writer, "{}", &chr2).unwrap();
+
+        chr1 + &chr2
     }
 
-    fn build_genome(path: PathBuf, window_size: u64, resolution: u64) -> PathBuf {
+    fn build_genome(path: PathBuf, window_size: u64, resolution: u64) -> (PathBuf, String) {
         let w5z1 = make_w5z(path.join("data1.w5z"));
         let w5z2 = make_w5z2(path.join("data2.w5z"));
         let fasta = make_fasta(path.join("genome.fa"));
         let builder = GenomeDataBuilder::new(
             path.join("builder"),
-            fasta,
+            path.join("genome.fa"),
             None,
             window_size,
             None,
@@ -107,19 +116,13 @@ mod tests {
         .unwrap();
         builder.add_file("data1", w5z1).unwrap();
         builder.add_file("data2", w5z2).unwrap();
-        path.join("builder")
-    }
-
-    #[test]
-    fn test_genome_data_builder() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        build_genome(temp_dir.path().to_path_buf(), 128, 8);
+        (path.join("builder"), fasta)
     }
 
     #[test]
     fn test_genome_data_loader1() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let builder = build_genome(temp_dir.path().to_path_buf(), 1, 1);
+        let (builder, fasta) = build_genome(temp_dir.path().to_path_buf(), 1, 1);
 
         for batch_size in 1..24 {
             let mut loader = GenomeDataLoader::new(
@@ -135,9 +138,13 @@ mod tests {
                 0,
             )
             .unwrap();
-            let values: Vec<_> = loader
+            let (seq, values): (String, Vec<_>) = loader
                 .iter()
-                .flat_map(|(_, v)| v.slice(s![.., .., 0]).to_owned().into_iter())
+                .flat_map(|(s, v)| {
+                    s.into_strings()
+                        .into_iter()
+                        .zip(v.slice(s![.., .., 0]).to_owned().into_iter())
+                })
                 .collect();
             let w5z = W5Z::open(temp_dir.path().join("data1.w5z")).unwrap();
             let truth: Vec<_> = w5z
@@ -148,6 +155,7 @@ mod tests {
                 .collect();
             assert_eq!(values.len(), truth.len());
             assert_eq!(values, truth);
+            assert_eq!(seq, fasta);
 
             let values: Vec<_> = loader
                 .iter()
@@ -167,7 +175,7 @@ mod tests {
     #[test]
     fn test_genome_data_loader2() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let builder = build_genome(temp_dir.path().to_path_buf(), 128, 8);
+        let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 128, 8);
 
         {
             let mut loader = GenomeDataLoader::new(
@@ -222,7 +230,7 @@ mod tests {
     #[test]
     fn test_genome_data_loader3() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let builder = build_genome(temp_dir.path().to_path_buf(), 32, 1);
+        let (builder, fasta) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
         let w5z = W5Z::open(temp_dir.path().join("data2.w5z")).unwrap();
         let truth: Vec<_> = w5z
             .get("chr1")
@@ -264,19 +272,22 @@ mod tests {
             0,
         )
         .unwrap();
-        let mut values: Vec<_> = loader
+        let mut seqs = String::new();
+        let mut values = Vec::new();
+        loader
             .iter()
-            .flat_map(|(_, v)| {
+            .for_each(|(s, v)| {
                 assert!(
                     v.shape()[1] == 16,
                     "Expected 16 channels, got {}",
                     v.shape()[1]
                 );
-                v.slice(s![.., .., 1]).to_owned().into_iter()
-            })
-            .collect();
+                seqs.extend(s.into_strings());
+                values.extend(v.slice(s![.., .., 1]).to_owned().into_iter());
+            });
         values = values[0..truth.len()].to_vec();
         assert_eq!(values.len(), truth.len());
         assert_almost_equal(&values, &truth, 0.005);
+        assert_eq!(seqs[0..fasta.len()], fasta);
     }
 }

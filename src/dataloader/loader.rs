@@ -165,21 +165,28 @@ impl GenomeDataLoader {
         } else {
             None
         };
-        let split_data = self.window_size.map(|s| {
+        let split_data = if let Some(s) = self.window_size {
             let builder_window_size = self.builder.window_size as usize;
             let resolution = self.builder.resolution as usize;
-            ensure!(
+            assert!(
                 s < builder_window_size,
                 "Loader's window size must be less than the dataset's window size ({})",
                 builder_window_size,
             );
-            ensure!(
+            assert!(
                 s % resolution == 0,
                 "Loader's window size must be a multiple of the dataset's resolution ({})",
                 resolution,
             );
-            Ok(s / resolution)
-        }).transpose().unwrap();
+
+            if s == builder_window_size {
+                None
+            } else {
+                Some(s / resolution)
+            }
+        } else {
+            None
+        };
         DataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
