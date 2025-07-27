@@ -73,6 +73,7 @@ impl ChunkIndex {
 
     pub fn iter_chunks<R: Rng>(
         &self,
+        split_data: Option<usize>,
         trim_target: Option<usize>,
         write: bool,
         shuffle: Option<&mut R>,
@@ -96,6 +97,9 @@ impl ChunkIndex {
             chunk.subset(idx).unwrap();
             if let Some(trim_target) = trim_target {
                 chunk.set_trim_target(trim_target);
+            }
+            if let Some(split_data) = split_data {
+                chunk.set_split_data(split_data);
             }
             chunk
         })

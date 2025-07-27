@@ -78,7 +78,7 @@ impl Values {
 
     fn trim(self, trim_target: usize) -> Self {
         let size = self.0.shape()[1];
-        let data = self.0.slice(s![.., trim_target..size - trim_target]);
+        let data = self.0.slice(s![.., trim_target..size - trim_target, ..]);
         Values(data.into_dyn().to_owned())
     }
 
@@ -95,16 +95,16 @@ impl Values {
         let values = buffers
             .into_par_iter()
             .map(|buffer| {
-                let data = Values::decode(&buffer)?;
-                if let Some(trim_target) = trim_target {
-                    Ok(data.trim(trim_target))
-                } else {
-                    Ok(data)
+                let mut data = Values::decode(&buffer)?;
+                data.0.insert_axis_inplace(Axis(2));
+                if let Some(t) = trim_target {
+                    data = data.trim(t);
                 }
+                Ok(data)
             })
             .collect::<Result<Vec<_>>>()?;
         let values = values.iter().map(|arr| arr.0.view()).collect::<Vec<_>>();
-        let arr = ndarray::stack(Axis(2), &values)?;
+        let arr = ndarray::concatenate(Axis(2), &values)?;
         Ok(Self(arr.as_standard_layout().into_owned()))
     }
 
@@ -188,6 +188,7 @@ pub struct DataChunk {
     location: PathBuf,  // Path to the chunk's directory
     pub(crate) segments: Vec<GenomicRange>,  // Genomic segments contained in this chunk
     trim_target: Option<usize>,  // Output trimming
+    split_data: Option<usize>, // Optional size for splitting data
     data_store: DataStore,  // Data store
     subset: Option<Vec<usize>>,  // Optional indices representing a subset of the data
 }
@@ -201,6 +202,7 @@ impl DataChunk {
             location: location.as_ref().to_path_buf(),
             segments,
             trim_target: None,
+            split_data: None,
             data_store: DataStore::create(
                 location.as_ref().join("data"),
                 std::iter::empty::<(_, String)>(),
@@ -226,6 +228,7 @@ impl DataChunk {
             location,
             segments,
             trim_target: None,
+            split_data: None,
             data_store: DataStore::open(store_path, writable)?,
             subset: None,
         })
@@ -233,6 +236,10 @@ impl DataChunk {
 
     pub fn set_trim_target(&mut self, trim_target: usize) {
         self.trim_target = Some(trim_target);
+    }
+
+    pub fn set_split_data(&mut self, split_data: usize) {
+        self.split_data = Some(split_data);
     }
 
     /// indices must be unique and sorted
@@ -270,10 +277,17 @@ impl DataChunk {
         if let Some(idx) = self.subset.as_ref() {
             seqs = seqs.select_rows(idx);
         }
+        if let Some(split_data) = self.split_data {
+            seqs = seqs.split(split_data)?;
+        }
         Ok(seqs)
     }
 
     pub(crate) fn get_seq_at(&self, i: usize) -> Result<Array1<u8>> {
+        if self.split_data.is_some() {
+            bail!("Cannot get sequence at index {} when split_data is set", i);
+        }
+
         if i >= self.segments.len() {
             bail!("Index out of bounds: {} >= {}", i, self.segments.len());
         }
@@ -286,9 +300,12 @@ impl DataChunk {
     }
 
     pub fn get(&mut self, key: &str) -> Result<Option<Values>> {
-        let result = if let Some(mut data) = self.data_store.read(key, self.trim_target)? {
+        let result = if let Some(mut data) = self.data_store.read_with(key, self.trim_target)? {
             if let Some(idx) = self.subset.as_ref() {
                 data = data.select_rows(idx);
+            }
+            if let Some(split_data) = self.split_data {
+                data = data.split(split_data)?;
             }
             Some(data)
         } else {
@@ -298,19 +315,43 @@ impl DataChunk {
     }
 
     pub fn gets(&mut self, keys: &[String]) -> Result<Values> {
-        let mut data = self.data_store.read_many(keys, self.trim_target)?;
-        if let Some(idx) = self.subset.as_ref() {
-            data = data.select_rows(idx);
+        if let Some(split) = self.split_data {
+            let mut data = self.data_store.read_many_with(keys, None)?;
+            if let Some(idx) = self.subset.as_ref() {
+                data = data.select_rows(idx);
+            }
+            data = data.split(split)?;
+            if let Some(trim_target) = self.trim_target {
+                data = data.trim(trim_target);
+            }
+            Ok(data)
+        } else {
+            let mut data = self.data_store.read_many_with(keys, self.trim_target)?;
+            if let Some(idx) = self.subset.as_ref() {
+                data = data.select_rows(idx);
+            }
+            Ok(data)
         }
-        Ok(data)
     }
 
     pub fn read_all(&mut self) -> Result<Values> {
-        let mut data = self.data_store.read_all(self.trim_target)?;
-        if let Some(idx) = self.subset.as_ref() {
-            data = data.select_rows(idx);
+        if let Some(split) = self.split_data {
+            let mut data = self.data_store.read_all_with(None)?;
+            if let Some(idx) = self.subset.as_ref() {
+                data = data.select_rows(idx);
+            }
+            data = data.split(split)?;
+            if let Some(trim_target) = self.trim_target {
+                data = data.trim(trim_target);
+            }
+            Ok(data)
+        } else {
+            let mut data = self.data_store.read_all_with(self.trim_target)?;
+            if let Some(idx) = self.subset.as_ref() {
+                data = data.select_rows(idx);
+            }
+            Ok(data)
         }
-        Ok(data)
     }
 
     pub fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
@@ -419,7 +460,7 @@ impl DataStore {
         })
     }
 
-    fn read(&mut self, key: &str, trim_target: Option<usize>) -> Result<Option<Values>> {
+    fn read_with(&mut self, key: &str, trim_target: Option<usize>) -> Result<Option<Values>> {
         if !self.index.contains_key(key) {
             return Ok(None);
         }
@@ -435,7 +476,7 @@ impl DataStore {
         Ok(Some(data))
     }
 
-    fn read_many(&mut self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
+    fn read_many_with(&mut self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
         let bytes = keys
             .iter()
             .map(|key| {
@@ -450,7 +491,7 @@ impl DataStore {
         Values::decode_many(bytes, trim_target)
     }
 
-    fn read_all(&mut self, trim_target: Option<usize>) -> Result<Values> {
+    fn read_all_with(&mut self, trim_target: Option<usize>) -> Result<Values> {
         self.file.rewind()?;
         let raw_bytes = self
             .index

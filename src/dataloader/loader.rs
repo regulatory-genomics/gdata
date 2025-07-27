@@ -87,7 +87,7 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
-    window_size: Option<usize>,
+    window_size: Option<u64>,
     batch_size: usize,
     trim_target: Option<usize>,
     scale: Option<f32>,
@@ -110,7 +110,7 @@ impl std::fmt::Display for GenomeDataLoader {
         write!(
             f,
             "    window_size = {}, resolution = {}, batch_size = {}, trim_target = {}",
-            self.builder.window_size,
+            self.window_size(),
             self.builder.resolution,
             self.batch_size,
             self.trim_target.unwrap_or(0),
@@ -121,20 +121,22 @@ impl std::fmt::Display for GenomeDataLoader {
 
 impl GenomeDataLoader {
     pub fn len(&self) -> usize {
-        let n = self.builder.seq_index.len();
+        let mut n = self.builder.seq_index.len();
+        let multiply_by = self.builder.window_size / self.window_size.unwrap_or(self.builder.window_size);
+        n *= multiply_by as usize;
         n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
     }
 
     pub fn set_trim_target(&mut self, trim_target: usize) {
-        if trim_target >= self.builder.window_size as usize {
-            panic!("Trim target must be less than window size");
+        if trim_target >= (self.window_size() / 2) as usize {
+            panic!("Trim target must be less than half of the window size");
         } else if trim_target % self.builder.resolution as usize != 0 {
             panic!(
                 "Trim target must be a multiple of resolution ({})",
                 self.builder.resolution
             );
         }
-        self.trim_target = Some(trim_target / self.builder.resolution as usize);
+        self.trim_target = Some(trim_target);
     }
 
     pub fn intersection(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
@@ -166,8 +168,8 @@ impl GenomeDataLoader {
             None
         };
         let split_data = if let Some(s) = self.window_size {
-            let builder_window_size = self.builder.window_size as usize;
-            let resolution = self.builder.resolution as usize;
+            let builder_window_size = self.builder.window_size;
+            let resolution = self.builder.resolution;
             assert!(
                 s < builder_window_size,
                 "Loader's window size must be less than the dataset's window size ({})",
@@ -182,7 +184,7 @@ impl GenomeDataLoader {
             if s == builder_window_size {
                 None
             } else {
-                Some(s / resolution)
+                Some((s / resolution) as usize)
             }
         } else {
             None
@@ -195,11 +197,13 @@ impl GenomeDataLoader {
                     buffer_data: Buffer::new(),
                     scale: self.scale.map(bf16::from_f32),
                     clamp_max: self.clamp_max.map(bf16::from_f32),
-                    chunks: self
-                        .builder
-                        .seq_index
-                        .iter_chunks(self.trim_target, false, shuffle),
-                    split_size: split_data,
+                    chunks: self.builder.seq_index.iter_chunks(
+                        split_data,
+                        self.trim_target
+                            .map(|t| t / self.builder.resolution as usize),
+                        false,
+                        shuffle,
+                    ),
                 },
                 self.prefetch,
             ),
@@ -228,7 +232,7 @@ impl GenomeDataLoader {
         trim_target: Option<usize>,
         scale: Option<f32>,
         clamp_max: Option<f32>,
-        window_size: Option<usize>,
+        window_size: Option<u64>,
         shuffle: bool,
         seq_as_string: bool,
         prefetch: usize,
@@ -237,12 +241,12 @@ impl GenomeDataLoader {
         let builder = GenomeDataBuilder::open(location)?;
         if let Some(window_size) = window_size {
             ensure!(
-                builder.window_size as usize % window_size == 0,
+                builder.window_size % window_size == 0,
                 "dataset's window size ({}) must be a multiple of the loader's window size",
                 builder.window_size,
             );
             ensure!(
-                window_size % builder.resolution as usize == 0,
+                window_size % builder.resolution == 0,
                 "Loader's window size must be a multiple of the dataset's resolution ({})",
                 builder.resolution
             );
@@ -297,6 +301,11 @@ impl GenomeDataLoader {
             .keys()
             .map(|x| x.pretty_show())
             .collect()
+    }
+
+    #[getter]
+    fn window_size(&self) -> u64 {
+        self.window_size.unwrap_or(self.builder.window_size)
     }
 
     #[getter]
@@ -633,7 +642,10 @@ impl<T: Clone + std::fmt::Debug> Buffer<T> {
             self.shape = item.shape()[1..].to_vec();
             self.stride = self.shape.iter().product();
         }
-        assert!(item.is_standard_layout(), "Buffer only supports standard layout arrays");
+        assert!(
+            item.is_standard_layout(),
+            "Buffer only supports standard layout arrays"
+        );
         let (data, offset) = item.into_raw_vec_and_offset();
         assert!(
             offset.unwrap_or(0) == 0,
@@ -695,7 +707,6 @@ struct _DataLoaderIter<T> {
     scale: Option<bf16>,
     clamp_max: Option<bf16>,
     chunks: T,
-    split_size: Option<usize>,
 }
 
 impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
@@ -714,12 +725,9 @@ impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
                 let seqs = chunk.get_seqs().unwrap();
                 let mut values = chunk.read_all().unwrap();
                 values.transform(self.scale, self.clamp_max);
-                if let Some(split_size) = self.split_size {
-                    (seqs.split(split_size).unwrap(), values.split(split_size).unwrap())
-                } else {
-                    (seqs, values)
-                }
-            }).collect();
+                (seqs, values)
+            })
+            .collect();
 
         let n_read = data.len();
         data.into_iter().for_each(|(seqs, values)| {
@@ -959,7 +967,7 @@ impl GenomeDataLoaderMap {
         mut loaders: IndexMap<String, GenomeDataLoader>,
         batch_size: Option<usize>,
         trim_target: Option<usize>,
-        window_size: Option<usize>,
+        window_size: Option<u64>,
         seq_as_string: bool,
     ) -> Result<Self> {
         ensure!(
@@ -991,7 +999,10 @@ impl GenomeDataLoaderMap {
         });
 
         ensure!(
-            loaders.values().map(|loader| loader.window_size).all_equal(),
+            loaders
+                .values()
+                .map(|loader| loader.window_size)
+                .all_equal(),
             "All genome data loaders must have the same window size",
         );
 

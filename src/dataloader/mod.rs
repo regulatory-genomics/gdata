@@ -261,7 +261,7 @@ mod tests {
 
         let mut loader = GenomeDataLoader::new(
             builder.clone(),
-            1,
+            7,
             None,
             None,
             None,
@@ -289,5 +289,99 @@ mod tests {
         assert_eq!(values.len(), truth.len());
         assert_almost_equal(&values, &truth, 0.005);
         assert_eq!(seqs[0..fasta.len()], fasta);
+    }
+
+    #[test]
+    fn test_genome_data_loader4() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
+
+        let mut loader1 = GenomeDataLoader::new(
+            builder.clone(),
+            7,
+            Some(4),
+            None,
+            None,
+            None,
+            false,
+            false,
+            1,
+            0,
+        )
+        .unwrap();
+        let values1: Vec<_> = loader1
+            .iter()
+            .flat_map(|(_, v)| v.slice(s![.., .., 1]).to_owned().into_iter())
+            .collect();
+
+        let mut loader2 = GenomeDataLoader::new(
+            builder.clone(),
+            7,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            1,
+            0,
+        )
+        .unwrap();
+        let values2: Vec<_> = loader2
+            .iter()
+            .flat_map(|(_, v)| {
+                let arr = v.slice(s![.., 4..28, 1]).to_owned();
+                arr.into_iter()
+            })
+            .collect();
+        assert_eq!(values1.len(), values2.len());
+        assert_eq!(values1, values2);
+    }
+
+    #[test]
+    fn test_genome_data_loader5() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
+
+        let mut loader1 = GenomeDataLoader::new(
+            builder.clone(),
+            7,
+            Some(4),
+            None,
+            None,
+            Some(16),
+            false,
+            false,
+            1,
+            0,
+        )
+        .unwrap();
+        let values1: Vec<_> = loader1
+            .iter()
+            .flat_map(|(_, v)| v.slice(s![.., .., 1]).to_owned().into_iter())
+            .collect();
+
+        let mut loader2 = GenomeDataLoader::new(
+            builder.clone(),
+            7,
+            None,
+            None,
+            None,
+            Some(16),
+            false,
+            false,
+            1,
+            0,
+        )
+        .unwrap();
+        let values2: Vec<_> = loader2
+            .iter()
+            .flat_map(|(_, v)| {
+                let arr = v.slice(s![.., 4..12, 1]).to_owned();
+                arr.into_iter()
+            })
+            .collect();
+        assert_eq!(values1.len(), values2.len());
+        assert_eq!(values1, values2);
     }
 }

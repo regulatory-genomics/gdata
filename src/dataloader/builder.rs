@@ -365,7 +365,7 @@ impl GenomeDataBuilder {
                 let w5z = chunk
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
-                self.seq_index.iter_chunks::<ThreadRng>(None, true, None)
+                self.seq_index.iter_chunks::<ThreadRng>(None, None, true, None)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {
