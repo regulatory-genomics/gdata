@@ -48,6 +48,12 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
     clamp_max : Optional[float]
         Clamp the values to this maximum value. If not provided, no clamping is applied.
         If `scale` is also provided, the clamping will be applied after scaling.
+    window_size : Optional[int]
+        The window size for retrieving genomic sequences. The loader's window size
+        can be different from the underlying dataset's window size so that the same
+        dataset can be used with different window sizes. However, there are two
+        restrictions: (1) The dataset's window size must be a multiple of the loader's window size;
+        (2) The loader's window size must be a multiple of the dataset's resolution.
     shuffle : bool
         If True, the data will be shuffled before being returned. Default is False.
     seq_as_string : bool
@@ -81,7 +87,7 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
-    split_data: Option<usize>,
+    window_size: Option<usize>,
     batch_size: usize,
     trim_target: Option<usize>,
     scale: Option<f32>,
@@ -159,6 +165,21 @@ impl GenomeDataLoader {
         } else {
             None
         };
+        let split_data = self.window_size.map(|s| {
+            let builder_window_size = self.builder.window_size as usize;
+            let resolution = self.builder.resolution as usize;
+            ensure!(
+                s < builder_window_size,
+                "Loader's window size must be less than the dataset's window size ({})",
+                builder_window_size,
+            );
+            ensure!(
+                s % resolution == 0,
+                "Loader's window size must be a multiple of the dataset's resolution ({})",
+                resolution,
+            );
+            Ok(s / resolution)
+        }).transpose().unwrap();
         DataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
@@ -171,7 +192,7 @@ impl GenomeDataLoader {
                         .builder
                         .seq_index
                         .iter_chunks(self.trim_target, false, shuffle),
-                    split_size: self.split_data,
+                    split_size: split_data,
                 },
                 self.prefetch,
             ),
@@ -207,25 +228,22 @@ impl GenomeDataLoader {
         random_seed: u64,
     ) -> Result<Self> {
         let builder = GenomeDataBuilder::open(location)?;
-        let split_data = window_size.map(|s| {
-            let builder_window_size = builder.window_size as usize;
-            let resolution = builder.resolution as usize;
+        if let Some(window_size) = window_size {
             ensure!(
-                s < builder_window_size,
-                "Loader's window size must be less than the dataset's window size ({})",
-                builder_window_size,
+                builder.window_size as usize % window_size == 0,
+                "dataset's window size ({}) must be a multiple of the loader's window size",
+                builder.window_size,
             );
             ensure!(
-                s % resolution == 0,
+                window_size % builder.resolution as usize == 0,
                 "Loader's window size must be a multiple of the dataset's resolution ({})",
-                resolution,
+                builder.resolution
             );
-            Ok(s / resolution)
-        }).transpose()?;
+        }
 
         let mut loader = Self {
             builder,
-            split_data,
+            window_size,
             batch_size,
             trim_target: None,
             scale,
@@ -879,6 +897,8 @@ impl DataIndexer {
     trim_target: Optional[int]
         Optional parameter to specify the trim target for all loaders.
         If not provided, each loader will use its own trim target.
+    window_size : Optional[int]
+        Optional parameter to specify the window size for all loaders.
     seq_as_string : bool
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
@@ -924,14 +944,15 @@ impl GenomeDataLoaderMap {
     #[new]
     #[pyo3(
         signature = (
-            loaders, *, batch_size=None, trim_target=None, seq_as_string=false,
+            loaders, *, batch_size=None, trim_target=None, window_size=None, seq_as_string=false,
         ),
-        text_signature = "($self, loaders, *, batch_size=None, trim_target=None, seq_as_string=False)"
+        text_signature = "($self, loaders, *, batch_size=None, trim_target=None, window_size=None, seq_as_string=False)"
     )]
     pub fn new(
         mut loaders: IndexMap<String, GenomeDataLoader>,
         batch_size: Option<usize>,
         trim_target: Option<usize>,
+        window_size: Option<usize>,
         seq_as_string: bool,
     ) -> Result<Self> {
         ensure!(
@@ -950,19 +971,22 @@ impl GenomeDataLoaderMap {
                 .min()
                 .unwrap()
         });
-        loaders.values_mut().for_each(|loader| {
-            loader.batch_size = batch_size;
-        });
-
-        if let Some(trim_target) = trim_target {
-            loaders.values_mut().for_each(|loader| {
-                loader.set_trim_target(trim_target);
-            });
-        }
 
         loaders.values_mut().for_each(|loader| {
             loader.seq_as_string = seq_as_string;
+            loader.batch_size = batch_size;
+            trim_target.map(|t| {
+                loader.set_trim_target(t);
+            });
+            window_size.map(|w| {
+                loader.window_size = Some(w);
+            });
         });
+
+        ensure!(
+            loaders.values().map(|loader| loader.window_size).all_equal(),
+            "All genome data loaders must have the same window size",
+        );
 
         Ok(Self(loaders.into_iter().map(|(k, v)| (k, v)).collect()))
     }
