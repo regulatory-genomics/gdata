@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn test_genome_data_loader5() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
+        let (builder, fasta) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
 
         let mut loader1 = GenomeDataLoader::new(
             builder.clone(),
@@ -356,10 +356,14 @@ mod tests {
             0,
         )
         .unwrap();
-        let values1: Vec<_> = loader1
+        let mut seqs = String::new();
+        let mut values1 = Vec::new();
+        loader1
             .iter()
-            .flat_map(|(_, v)| v.slice(s![.., .., 1]).to_owned().into_iter())
-            .collect();
+            .for_each(|(s, v)| {
+                seqs.extend(s.into_strings());
+                values1.extend(v.slice(s![.., .., 1]).to_owned().into_iter());
+            });
 
         let mut loader2 = GenomeDataLoader::new(
             builder.clone(),
@@ -383,5 +387,6 @@ mod tests {
             .collect();
         assert_eq!(values1.len(), values2.len());
         assert_eq!(values1, values2);
+        assert_eq!(seqs[0..fasta.len()], fasta);
     }
 }

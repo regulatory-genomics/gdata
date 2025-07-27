@@ -73,7 +73,7 @@ impl ChunkIndex {
 
     pub fn iter_chunks<R: Rng>(
         &self,
-        split_data: Option<usize>,
+        split_data: Option<(usize, usize)>,
         trim_target: Option<usize>,
         write: bool,
         shuffle: Option<&mut R>,

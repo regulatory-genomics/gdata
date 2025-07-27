@@ -184,7 +184,7 @@ impl GenomeDataLoader {
             if s == builder_window_size {
                 None
             } else {
-                Some((s / resolution) as usize)
+                Some((s as usize, (s / resolution) as usize))
             }
         } else {
             None

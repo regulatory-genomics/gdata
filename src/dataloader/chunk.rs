@@ -188,7 +188,7 @@ pub struct DataChunk {
     location: PathBuf,  // Path to the chunk's directory
     pub(crate) segments: Vec<GenomicRange>,  // Genomic segments contained in this chunk
     trim_target: Option<usize>,  // Output trimming
-    split_data: Option<usize>, // Optional size for splitting data
+    split_data: Option<(usize, usize)>, // Optional size for splitting data
     data_store: DataStore,  // Data store
     subset: Option<Vec<usize>>,  // Optional indices representing a subset of the data
 }
@@ -238,7 +238,7 @@ impl DataChunk {
         self.trim_target = Some(trim_target);
     }
 
-    pub fn set_split_data(&mut self, split_data: usize) {
+    pub fn set_split_data(&mut self, split_data: (usize, usize)) {
         self.split_data = Some(split_data);
     }
 
@@ -278,7 +278,7 @@ impl DataChunk {
             seqs = seqs.select_rows(idx);
         }
         if let Some(split_data) = self.split_data {
-            seqs = seqs.split(split_data)?;
+            seqs = seqs.split(split_data.0)?;
         }
         Ok(seqs)
     }
@@ -305,7 +305,7 @@ impl DataChunk {
                 data = data.select_rows(idx);
             }
             if let Some(split_data) = self.split_data {
-                data = data.split(split_data)?;
+                data = data.split(split_data.1)?;
             }
             Some(data)
         } else {
@@ -320,7 +320,7 @@ impl DataChunk {
             if let Some(idx) = self.subset.as_ref() {
                 data = data.select_rows(idx);
             }
-            data = data.split(split)?;
+            data = data.split(split.1)?;
             if let Some(trim_target) = self.trim_target {
                 data = data.trim(trim_target);
             }
@@ -340,7 +340,7 @@ impl DataChunk {
             if let Some(idx) = self.subset.as_ref() {
                 data = data.select_rows(idx);
             }
-            data = data.split(split)?;
+            data = data.split(split.1)?;
             if let Some(trim_target) = self.trim_target {
                 data = data.trim(trim_target);
             }
