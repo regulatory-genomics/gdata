@@ -14,10 +14,40 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-#[derive(Decode, Encode)]
+#[derive(Debug, Clone, Decode, Encode)]
 pub struct Values(#[bincode(with_serde)] pub ArrayD<bf16>);
 
 impl Values {
+    /// Split the values into consecutive chunks on the second dimension (the sequence).
+    /// The last chunk is dropped if it is smaller.
+    pub fn split(self, size: usize) -> Result<Self> {
+        let d = self.0.shape()[0];
+        let h = self.0.shape()[1];
+        let w = self.0.shape()[2];
+
+        if size == 0 || h % size != 0 {
+            bail!("Cannot split values into chunks of size {}: length {} is not a multiple of size", size, h);
+        }
+
+        let num_chunks = h / size;
+
+        // Reshape to 4D to expose the chunks as a new dimension.
+        // The shape becomes (d, num_chunks, chunk_height, w).
+        // No axis permutation is needed because the dimensions are already in the correct order
+        // to be collapsed.
+        let intermediate_shape = (d, num_chunks, size, w);
+
+        // Reshape again to the final 3D shape by collapsing the first two dimensions.
+        let final_shape = (d * num_chunks, size, w);
+
+        let result = self.0
+            .into_shape_with_order(intermediate_shape)?
+            .into_shape_with_order(final_shape)?
+            .into_dyn();
+
+        Ok(Values(result))
+    }
+
     pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = ArrayD<f32>> + '_ {
         self.0
             .axis_iter(Axis(0))
@@ -74,7 +104,8 @@ impl Values {
             })
             .collect::<Result<Vec<_>>>()?;
         let values = values.iter().map(|arr| arr.0.view()).collect::<Vec<_>>();
-        Ok(Values(ndarray::stack(Axis(2), &values)?))
+        let arr = ndarray::stack(Axis(2), &values)?;
+        Ok(Self(arr.as_standard_layout().into_owned()))
     }
 
     fn encode(self) -> Result<Vec<u8>> {
@@ -98,6 +129,25 @@ impl<'py> IntoPyObject<'py> for Sequences {
 }
 
 impl Sequences {
+    pub fn split(self, size: usize) -> Result<Self> {
+        let (d, h) = self.0.dim();
+
+        if size == 0 || h % size != 0 {
+            bail!("Cannot split values into chunks of size {}: length {} is not a multiple of size", size, h);
+        }
+
+        let num_chunks = h / size;
+        let intermediate_shape = (d, num_chunks, size);
+        let final_shape = (d * num_chunks, size);
+
+        let result = self.0
+            .into_shape_with_order(intermediate_shape)?
+            .into_shape_with_order(final_shape)?;
+
+        Ok(Self(result))
+ 
+    }
+
     pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
         self.0.axis_iter(Axis(0)).map(|row| row.to_owned())
     }

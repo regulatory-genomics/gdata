@@ -3,7 +3,7 @@ use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Ix2, Array, Array1, ArrayD, Dimension};
+use ndarray::{Array, Array1, ArrayD, Dimension, Ix2};
 use numpy::{PyArray1, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
@@ -81,6 +81,7 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
+    split_data: Option<usize>,
     batch_size: usize,
     trim_target: Option<usize>,
     scale: Option<f32>,
@@ -166,7 +167,11 @@ impl GenomeDataLoader {
                     buffer_data: Buffer::new(),
                     scale: self.scale.map(bf16::from_f32),
                     clamp_max: self.clamp_max.map(bf16::from_f32),
-                    chunks: self.builder.seq_index.iter_chunks(self.trim_target, false, shuffle),
+                    chunks: self
+                        .builder
+                        .seq_index
+                        .iter_chunks(self.trim_target, false, shuffle),
+                    split_size: self.split_data,
                 },
                 self.prefetch,
             ),
@@ -179,10 +184,15 @@ impl GenomeDataLoader {
 impl GenomeDataLoader {
     #[new]
     #[pyo3(
-        signature = (
-            location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, shuffle=false, seq_as_string=false, prefetch=16, random_seed=2025,
+        signature = (location, *,
+            batch_size=8, trim_target=None, scale=None, clamp_max=None,
+            window_size=None, shuffle=false, seq_as_string=false, prefetch=16,
+            random_seed=2025,
         ),
-        text_signature = "($self, location, *, batch_size=8, trim_target=None, scale=None, clamp_max=None, shuffle=False, seq_as_string=False, prefetch=16, random_seed=2025)"
+        text_signature = "($self, location, *,
+            batch_size=8, trim_target=None, scale=None, clamp_max=None,
+            window_size=None, shuffle=False, seq_as_string=False, prefetch=16,
+            random_seed=2025)"
     )]
     pub fn new(
         location: PathBuf,
@@ -190,13 +200,32 @@ impl GenomeDataLoader {
         trim_target: Option<usize>,
         scale: Option<f32>,
         clamp_max: Option<f32>,
+        window_size: Option<usize>,
         shuffle: bool,
         seq_as_string: bool,
         prefetch: usize,
         random_seed: u64,
     ) -> Result<Self> {
+        let builder = GenomeDataBuilder::open(location)?;
+        let split_data = window_size.map(|s| {
+            let builder_window_size = builder.window_size as usize;
+            let resolution = builder.resolution as usize;
+            ensure!(
+                s < builder_window_size,
+                "Loader's window size must be less than the dataset's window size ({})",
+                builder_window_size,
+            );
+            ensure!(
+                s % resolution == 0,
+                "Loader's window size must be a multiple of the dataset's resolution ({})",
+                resolution,
+            );
+            Ok(s / resolution)
+        }).transpose()?;
+
         let mut loader = Self {
-            builder: GenomeDataBuilder::open(location)?,
+            builder,
+            split_data,
             batch_size,
             trim_target: None,
             scale,
@@ -320,7 +349,7 @@ impl GenomeDataLoader {
     }
 
     /** Creating a new genomic data loader in which the regions differ from the specified ones.
-      
+
         This method allows you to subset the genomic data by removing the specified regions.
 
         Parameters
@@ -450,18 +479,24 @@ else:
         log: bool,
         savefig: Option<PathBuf>,
     ) -> Vec<((f32, f32), usize)> {
-        let (lo, hi) = slf.iter().take(limit).flat_map(|(_, values)| 
-            values.into_iter().flat_map(|mut x| {
-                if min.is_some() && x < min.unwrap() {
-                    None
-                } else {
-                    if log {
-                        x = (x+1.0).ln();
+        let (lo, hi) = slf
+            .iter()
+            .take(limit)
+            .flat_map(|(_, values)| {
+                values.into_iter().flat_map(|mut x| {
+                    if min.is_some() && x < min.unwrap() {
+                        None
+                    } else {
+                        if log {
+                            x = (x + 1.0).ln();
+                        }
+                        Some(x)
                     }
-                    Some(x)
-                }
+                })
             })
-        ).minmax().into_option().unwrap();
+            .minmax()
+            .into_option()
+            .unwrap();
 
         let bin_size = (hi - lo) / bins as f32;
         let mut histogram = vec![0; bins];
@@ -480,17 +515,24 @@ else:
             }
         });
 
-        let result: Vec<_> = histogram.into_iter().enumerate().flat_map(|(i, count)| {
-            if count == 0 {
-                None
-            } else {
-                let bin_start = lo + i as f32 * bin_size;
-                let bin_end = bin_start + bin_size;
-                Some(((bin_start, bin_end), count))
-            }
-        }).collect();
+        let result: Vec<_> = histogram
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, count)| {
+                if count == 0 {
+                    None
+                } else {
+                    let bin_start = lo + i as f32 * bin_size;
+                    let bin_end = bin_start + bin_size;
+                    Some(((bin_start, bin_end), count))
+                }
+            })
+            .collect();
 
-        let (xs, ys): (Vec<_>, Vec<_>) = result.iter().map(|((x1, x2), y)| ((x1 + x2) / 2.0, *y)).unzip();
+        let (xs, ys): (Vec<_>, Vec<_>) = result
+            .iter()
+            .map(|((x1, x2), y)| ((x1 + x2) / 2.0, *y))
+            .unzip();
 
         let py_code = r#"
 from matplotlib import pyplot as plt
@@ -538,28 +580,27 @@ impl Iterator for DataLoaderIter {
     }
 }
 
+#[derive(Debug)]
 struct Buffer<T> {
     data: VecDeque<Vec<T>>,
-    outer_idx: usize,
-    inner_idx: usize,
+    pos: usize,
     shape: Vec<usize>,
     stride: usize,
 }
 
-impl<T: Clone> Buffer<T> {
+impl<T: Clone + std::fmt::Debug> Buffer<T> {
     fn new() -> Self {
         Self {
             data: VecDeque::new(),
-            outer_idx: 0,
-            inner_idx: 0,
+            pos: 0,
             shape: Vec::new(),
             stride: 1,
         }
     }
 
-    fn len(&self) -> usize {
+    fn remaining(&self) -> usize {
         let n = self.data.iter().map(|d| d.len()).sum::<usize>();
-        n / self.stride
+        (n - self.pos) / self.stride
     }
 
     fn add<D: Dimension>(&mut self, item: Array<T, D>) {
@@ -567,33 +608,36 @@ impl<T: Clone> Buffer<T> {
             self.shape = item.shape()[1..].to_vec();
             self.stride = self.shape.iter().product();
         }
+        assert!(item.is_standard_layout(), "Buffer only supports standard layout arrays");
         let (data, offset) = item.into_raw_vec_and_offset();
-        assert!(offset.unwrap_or(0) == 0, "Buffer does not support non-zero offset");
+        assert!(
+            offset.unwrap_or(0) == 0,
+            "Buffer does not support non-zero offset"
+        );
         self.data.push_back(data);
     }
 
-    fn take(&mut self, n: usize) -> Option<ArrayD<T>> {
-        let n = self.stride * n;
-        if self.outer_idx >= self.data.len() {
+    fn take(&mut self, n_record: usize) -> Option<ArrayD<T>> {
+        if self.data.is_empty() {
             return None;
         }
 
+        let n = self.stride * n_record;
         let mut result = Vec::with_capacity(n);
-        while result.len() < n && self.outer_idx < self.data.len() {
-            let inner_data = &self.data[self.outer_idx];
-            let remaining = inner_data.len() - self.inner_idx;
+        while result.len() < n && !self.data.is_empty() {
+            let remaining = self.data[0].len() - self.pos;
             if remaining == 0 {
-                self.outer_idx += 1;
-                self.inner_idx = 0;
+                self.data.pop_front();
+                self.pos = 0;
                 continue;
             }
 
             let take_count = remaining.min(n - result.len());
-            result.extend_from_slice(&inner_data[self.inner_idx..self.inner_idx + take_count]);
-            self.inner_idx += take_count;
+            result.extend_from_slice(&self.data[0][self.pos..self.pos + take_count]);
+            self.pos += take_count;
 
-            if self.inner_idx >= inner_data.len() {
-                self.inner_idx = 0;
+            if self.pos >= self.data[0].len() {
+                self.pos = 0;
                 self.data.pop_front();
             }
         }
@@ -601,19 +645,20 @@ impl<T: Clone> Buffer<T> {
         if result.is_empty() {
             None
         } else {
-            let shape = std::iter::once(result.len() / self.stride).chain(self.shape.iter().cloned())
+            let shape = std::iter::once(result.len() / self.stride)
+                .chain(self.shape.iter().cloned())
                 .collect::<Vec<_>>();
             Some(ArrayD::from_shape_vec(shape, result).unwrap())
         }
     }
 
     fn take_all(&mut self) -> ArrayD<T> {
-        let n = self.len() / self.stride;
-        let data: Vec<_> = self.data.drain(..).flatten().collect();
-        let shape = std::iter::once(n).chain(self.shape.iter().cloned())
+        let n = self.remaining();
+        let data: Vec<_> = self.data.drain(..).flatten().skip(self.pos).collect();
+        let shape = std::iter::once(n)
+            .chain(self.shape.iter().cloned())
             .collect::<Vec<_>>();
-        self.inner_idx = 0;
-        self.outer_idx = 0;
+        self.pos = 0;
         ArrayD::from_shape_vec(shape, data).unwrap()
     }
 }
@@ -625,38 +670,38 @@ struct _DataLoaderIter<T> {
     scale: Option<bf16>,
     clamp_max: Option<bf16>,
     chunks: T,
+    split_size: Option<usize>,
 }
 
 impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
     fn load_chunks(&mut self, n: usize) -> Option<usize> {
-        if n == 1 {
-            let mut chunk = self.chunks.next()?;
-            let seqs = chunk.get_seqs().unwrap();
-            let mut values = chunk.read_all().unwrap();
-            values.transform(self.scale, self.clamp_max);
-            self.buffer_seq.add(seqs.0);
-            self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
-            Some(1)
-        } else  {
-            let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next()).take(n).flatten().collect();
-            if chunks.is_empty() {
-                return None;
-            }
+        let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next())
+            .take(n)
+            .flatten()
+            .collect();
+        if chunks.is_empty() {
+            return None;
+        }
 
-            let data: Vec<_> = chunks.into_par_iter().map(|mut chunk| {
+        let data: Vec<_> = chunks
+            .into_par_iter()
+            .map(|mut chunk| {
                 let seqs = chunk.get_seqs().unwrap();
                 let mut values = chunk.read_all().unwrap();
                 values.transform(self.scale, self.clamp_max);
-                (seqs, values)
+                if let Some(split_size) = self.split_size {
+                    (seqs.split(split_size).unwrap(), values.split(split_size).unwrap())
+                } else {
+                    (seqs, values)
+                }
             }).collect();
-            let n_read = data.len();
 
-            data.into_iter().for_each(|(seqs, values)| {
-                self.buffer_seq.add(seqs.0);
-                self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
-            });
-            Some(n_read)
-        }
+        let n_read = data.len();
+        data.into_iter().for_each(|(seqs, values)| {
+            self.buffer_seq.add(seqs.0);
+            self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
+        });
+        Some(n_read)
     }
 }
 
@@ -664,7 +709,7 @@ impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
     type Item = (Sequences, ArrayD<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let n_buffer = self.buffer_seq.len();
+        let n_buffer = self.buffer_data.remaining();
         if n_buffer < self.batch_size {
             if let Some(_) = self.load_chunks(4) {
                 self.next()
@@ -672,18 +717,22 @@ impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
                 if n_buffer == 0 {
                     None
                 } else {
-                    let seqs = self.buffer_seq.take_all().into_dimensionality::<Ix2>().unwrap();
+                    let seqs = self
+                        .buffer_seq
+                        .take_all()
+                        .into_dimensionality::<Ix2>()
+                        .unwrap();
                     let data = self.buffer_data.take_all();
                     Some((Sequences(seqs), data))
                 }
             }
         } else {
+            let data = self.buffer_data.take(self.batch_size).unwrap();
             let seqs = self
                 .buffer_seq
-                .take(self.batch_size).unwrap().into_dimensionality::<Ix2>().unwrap();
-            let data = self
-                .buffer_data
                 .take(self.batch_size)
+                .unwrap()
+                .into_dimensionality::<Ix2>()
                 .unwrap();
             Some((Sequences(seqs), data))
         }
@@ -721,9 +770,7 @@ impl<T: Send + 'static> PrefethIterator<T> {
         let (sender, receiver) = sync_channel(buffer_size);
         std::thread::spawn(move || {
             for item in iter {
-                if sender.send(item).is_err() {
-                    break;
-                }
+                sender.send(item).unwrap();
             }
         });
         Self(Arc::new(Mutex::new(receiver)))
@@ -917,9 +964,7 @@ impl GenomeDataLoaderMap {
             loader.seq_as_string = seq_as_string;
         });
 
-        Ok(Self(
-            loaders.into_iter().map(|(k, v)| (k, v)).collect(),
-        ))
+        Ok(Self(loaders.into_iter().map(|(k, v)| (k, v)).collect()))
     }
 
     /** Returns a dictionary mapping dataset tags to the number of tracks.
@@ -985,7 +1030,9 @@ impl GenomeDataLoaderMap {
         text_signature = "($self, regions)"
     )]
     fn intersection(&self, regions: Vec<String>) -> Result<Self> {
-        let result = self.0.iter()
+        let result = self
+            .0
+            .iter()
             .map(|(tag, loader)| {
                 let new_loader = loader.intersection_py(regions.clone());
                 Ok((tag.clone(), new_loader))
@@ -995,7 +1042,7 @@ impl GenomeDataLoaderMap {
     }
 
     /** Creating a new genomic data loader in which the regions differ from the specified ones.
-      
+
         This method allows you to subset the genomic data by removing the specified regions.
 
         Parameters
@@ -1018,7 +1065,9 @@ impl GenomeDataLoaderMap {
         text_signature = "($self, regions)"
     )]
     fn difference(&self, regions: Vec<String>) -> Result<Self> {
-        let result = self.0.iter()
+        let result = self
+            .0
+            .iter()
             .map(|(tag, loader)| {
                 let new_loader = loader.difference_py(regions.clone());
                 Ok((tag.clone(), new_loader))
@@ -1142,7 +1191,11 @@ impl CatGenomeDataLoader {
         signature = (loaders, *, batch_size=None, shuffle=None),
         text_signature = "($self, loaders, *, batch_size=None, shuffle=None)"
     )]
-    pub fn new(mut loaders: Vec<GenomeDataLoaderMap>, batch_size: Option<usize>, shuffle: Option<bool>) -> Result<Self> {
+    pub fn new(
+        mut loaders: Vec<GenomeDataLoaderMap>,
+        batch_size: Option<usize>,
+        shuffle: Option<bool>,
+    ) -> Result<Self> {
         ensure!(
             !loaders.is_empty(),
             "At least one GenomeDataLoaderMap must be provided"
@@ -1175,7 +1228,7 @@ impl CatGenomeDataLoader {
         IndexMap::from_iter(
             self.0
                 .iter()
-                .flat_map(|loader| loader.n_tracks().into_iter())
+                .flat_map(|loader| loader.n_tracks().into_iter()),
         )
     }
 
