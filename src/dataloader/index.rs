@@ -30,6 +30,11 @@ impl ChunkIndex {
         self.0.len()
     }
 
+    pub fn get_chunk_size(&self) -> usize {
+        let chunk_info = &self.0.values().next().unwrap().0;
+        chunk_info.open(false).unwrap().len()
+    }
+
     /// Returns all chromosomes in the index.
     pub fn chromosomes(&self) -> impl Iterator<Item = &String> {
         self.0

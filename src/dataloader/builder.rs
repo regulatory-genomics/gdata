@@ -342,6 +342,17 @@ impl GenomeDataBuilder {
         self.seq_index.keys().map(|x| x.pretty_show()).collect()
     }
 
+    /** Returns the size of each chunk in the dataset.
+
+       Returns
+       -------
+       int
+           The size of each chunk in the dataset.
+    */
+    pub fn get_chunk_size(&self) -> usize {
+        self.seq_index.get_chunk_size()
+    }
+
     /** Adds w5z files to the dataset.
 
        This method processes a batch of files, each associated with a key, and adds them to the genomic data.

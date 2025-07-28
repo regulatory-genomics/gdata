@@ -61,9 +61,11 @@ use crate::dataloader::chunk::{DataChunk, Sequences};
         This is useful for cases where you want to work with the sequences as text,
         such as for visualization or text-based analysis.
     prefetch : int
-        The number of batches to prefetch for efficient data loading.
+        The number of chunks to prefetch for efficient data loading.
+        The chunks here refer to the data chunks stored in the GenomeDataBuilder.
         This allows for asynchronous loading of data, improving performance during training or inference.
-        But it will increase memory usage, so it should be set according to the available resources.
+        But it will increase memory usage, the memory usage will be approximately
+        `2 * prefetch * memory_of_chunk`.
     random_seed : int
         The random seed for shuffling the data. Default is 2025.
 
@@ -204,8 +206,9 @@ impl GenomeDataLoader {
                         false,
                         shuffle,
                     ),
+                    num_parallel_job: self.prefetch,
                 },
-                self.prefetch,
+                (self.prefetch * self.builder.get_chunk_size()) / self.batch_size,
             ),
             seq_as_string: self.seq_as_string,
         }
@@ -218,12 +221,12 @@ impl GenomeDataLoader {
     #[pyo3(
         signature = (location, *,
             batch_size=8, trim_target=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=false, seq_as_string=false, prefetch=16,
+            window_size=None, shuffle=false, seq_as_string=false, prefetch=4,
             random_seed=2025,
         ),
         text_signature = "($self, location, *,
             batch_size=8, trim_target=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=False, seq_as_string=False, prefetch=16,
+            window_size=None, shuffle=False, seq_as_string=False, prefetch=4,
             random_seed=2025)"
     )]
     pub fn new(
@@ -707,12 +710,13 @@ struct _DataLoaderIter<T> {
     scale: Option<bf16>,
     clamp_max: Option<bf16>,
     chunks: T,
+    num_parallel_job: usize,
 }
 
 impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
-    fn load_chunks(&mut self, n: usize) -> Option<usize> {
+    fn load_chunks(&mut self) -> Option<usize> {
         let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next())
-            .take(n)
+            .take(self.num_parallel_job)
             .flatten()
             .collect();
         if chunks.is_empty() {
@@ -744,7 +748,7 @@ impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
     fn next(&mut self) -> Option<Self::Item> {
         let n_buffer = self.buffer_data.remaining();
         if n_buffer < self.batch_size {
-            if let Some(_) = self.load_chunks(4) {
+            if let Some(_) = self.load_chunks() {
                 self.next()
             } else {
                 if n_buffer == 0 {

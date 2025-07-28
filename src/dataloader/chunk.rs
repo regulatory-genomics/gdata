@@ -263,6 +263,7 @@ impl DataChunk {
         Ok(())
     }
 
+    /// Returns the chunk size, i.e., the number of records in the chunk.
     pub fn len(&self) -> usize {
         self.segments.len()
     }
