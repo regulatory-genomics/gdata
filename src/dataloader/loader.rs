@@ -208,7 +208,7 @@ impl GenomeDataLoader {
                     ),
                     num_parallel_job: self.prefetch,
                 },
-                (self.prefetch * self.builder.get_chunk_size()) / self.batch_size,
+                self.prefetch * self.builder.get_chunk_size() / self.batch_size,
             ),
             seq_as_string: self.seq_as_string,
         }

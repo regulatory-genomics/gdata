@@ -380,7 +380,7 @@ impl DataChunk {
 
 #[derive(Debug)]
 struct DataStore {
-    index: IndexMap<String, (usize, usize)>,
+    index: Option<IndexMap<String, (usize, usize)>>,
     file: std::fs::File,
     location: PathBuf,
 }
@@ -417,7 +417,7 @@ impl DataStore {
 
         file.flush()?;
         let store = Self {
-            index,
+            index: Some(index),
             file,
             location: location.as_ref().to_path_buf(),
         };
@@ -448,12 +448,14 @@ impl DataStore {
         })?;
 
         let index_file = location.as_ref().with_extension("index");
-        if !index_file.exists() {
-            bail!("Index file not found at {}", index_file.display());
-        }
-        let index_data = std::fs::read(index_file)?;
-        let index: IndexMap<String, (usize, usize)> =
-            bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
+        let index = if index_file.exists() {
+            let index_data = std::fs::read(index_file)?;
+            let index: IndexMap<String, (usize, usize)> =
+                bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
+            Some(index)
+        } else {
+            None
+        };
         Ok(Self {
             index,
             file,
@@ -462,6 +464,9 @@ impl DataStore {
     }
 
     fn read_with(&mut self, key: &str, trim_target: Option<usize>) -> Result<Option<Values>> {
+        if self.index.is_none() {
+            bail!("Data store index is not initialized");
+        }
         if !self.index.contains_key(key) {
             return Ok(None);
         }
@@ -478,6 +483,9 @@ impl DataStore {
     }
 
     fn read_many_with(&mut self, keys: &[String], trim_target: Option<usize>) -> Result<Values> {
+        if self.index.is_none() {
+            bail!("Data store index is not initialized");
+        }
         let bytes = keys
             .iter()
             .map(|key| {
@@ -494,8 +502,29 @@ impl DataStore {
 
     fn read_all_with(&mut self, trim_target: Option<usize>) -> Result<Values> {
         self.file.rewind()?;
+
+        if let Some(index) = &self.index {
+            let raw_bytes = index
+                .iter()
+                .map(|(_, (_, size))| {
+                    let mut buffer = vec![0; *size];
+                    self.file.read_exact(&mut buffer)?;
+                    Ok(buffer)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Values::decode_many(raw_bytes, trim_target)
+        } else {
+        }
+
+        if self.index.is_none() {
+            let mut buf = Vec::new();
+            self.file.read_to_end(buf)?;
+        }
+
         let raw_bytes = self
             .index
+            .as_ref()
+            .unwrap()
             .iter()
             .map(|(_, (_, size))| {
                 let mut buffer = vec![0; *size];
@@ -527,6 +556,22 @@ impl DataStore {
 
         self.file.flush()?;
         self.write_index()?;
+        Ok(())
+    }
+
+    /// Consolidate the data store by combining all entries into a single array for
+    /// faster loading and reduced file size.
+    fn consolidate(&mut self) -> Result<()> {
+        let data = self.read_all_with(None)?;
+        self.file.set_len(0)?;
+        self.file.rewind()?;
+        self.file.write_all(&data.encode()?)?;
+        // delete the index file
+        let index_file = self.location.with_extension("index");
+        if index_file.exists() {
+            std::fs::remove_file(index_file)?;
+        }
+
         Ok(())
     }
 }
