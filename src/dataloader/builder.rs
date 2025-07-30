@@ -3,7 +3,7 @@ use bed_utils::bed::{BEDLike, GenomicRange};
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::Array3;
 use noodles::core::Position;
 use noodles::fasta::{
     fai::Index,
@@ -128,6 +128,13 @@ impl GenomeDataBuilder {
             resolution,
             seq_index: index,
         })
+    }
+
+    pub fn finish_with(&self, c: usize) -> Result<()> {
+        self.seq_index.iter_chunks::<ThreadRng>(None, None, true, None).for_each(|mut chunk| {
+            chunk.consolidate(c).unwrap();
+        });
+        Ok(())
     }
 }
 
@@ -413,12 +420,11 @@ impl GenomeDataBuilder {
                                         v
                                     })
                                     .collect();
-                                let arr = Array2::from_shape_vec(
-                                    (segments.len(), n_cols as usize),
+                                let arr = Array3::from_shape_vec(
+                                    (segments.len(), n_cols as usize, 1),
                                     arr_elems,
                                 )
-                                .unwrap()
-                                .into_dyn();
+                                .unwrap();
                                 (key.to_string(), Values(arr))
                             });
                             dc.save_data(data).unwrap();
@@ -448,6 +454,10 @@ impl GenomeDataBuilder {
     )]
     pub fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
         self.add_files(IndexMap::from([(key.to_string(), w5z)]))
+    }
+
+    pub fn finish(&self) -> Result<()> {
+        self.finish_with(128)
     }
 }
 

@@ -727,7 +727,7 @@ impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
             .into_par_iter()
             .map(|mut chunk| {
                 let seqs = chunk.get_seqs().unwrap();
-                let mut values = chunk.read_all().unwrap();
+                let mut values = chunk.read_all();
                 values.transform(self.scale, self.clamp_max);
                 (seqs, values)
             })
@@ -867,6 +867,8 @@ impl DataIndexer {
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
+        todo!()
+        /*
         let vals = chunk.open(false)?.gets(j)?;
         Ok(vals
             .0
@@ -874,6 +876,7 @@ impl DataIndexer {
             .nth(*i)
             .unwrap()
             .to_owned())
+            */
     }
 }
 
