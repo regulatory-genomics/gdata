@@ -729,14 +729,14 @@ impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
                 let seqs = chunk.get_seqs().unwrap();
                 let mut values = chunk.read_all();
                 values.transform(self.scale, self.clamp_max);
-                (seqs, values)
+                (seqs.0, values.0.mapv(|x| x.to_f32()))
             })
             .collect();
 
         let n_read = data.len();
         data.into_iter().for_each(|(seqs, values)| {
-            self.buffer_seq.add(seqs.0);
-            self.buffer_data.add(values.0.mapv(|x| x.to_f32()));
+            self.buffer_seq.add(seqs);
+            self.buffer_data.add(values);
         });
         Some(n_read)
     }

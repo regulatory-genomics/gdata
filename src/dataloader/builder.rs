@@ -12,7 +12,7 @@ use noodles::fasta::{
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use rand::rngs::ThreadRng;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufReader;
@@ -130,10 +130,17 @@ impl GenomeDataBuilder {
         })
     }
 
-    pub fn finish_with(&self, c: usize) -> Result<()> {
-        self.seq_index.iter_chunks::<ThreadRng>(None, None, true, None).for_each(|mut chunk| {
-            chunk.consolidate(c).unwrap();
-        });
+    pub fn finish_with(&self, n: usize) -> Result<()> {
+        self.seq_index
+            .iter_chunks::<ThreadRng>(None, None, true, None)
+            .chunks(8)
+            .into_iter()
+            .for_each(|chunk| {
+                chunk
+                    .collect::<Vec<_>>()
+                    .into_par_iter()
+                    .for_each(|mut c| c.consolidate(n).unwrap());
+            });
         Ok(())
     }
 }
@@ -383,7 +390,8 @@ impl GenomeDataBuilder {
                 let w5z = chunk
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
-                self.seq_index.iter_chunks::<ThreadRng>(None, None, true, None)
+                self.seq_index
+                    .iter_chunks::<ThreadRng>(None, None, true, None)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {

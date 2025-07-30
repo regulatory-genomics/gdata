@@ -21,7 +21,6 @@ hdf5 = { package = "hdf5-metno", version = "0.10" }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.10", features = ["static", "zlib", "threadsafe"] }
 indicatif = "0.17"
 log = "0.4"
-lz4_flex = { version = "0.11", default-features = false}
 pyo3-log = "0.12"
 noodles = { version = "0.99.0", features = ["core", "fasta", "sam", "bam"] }
 bed-utils = "0.9.1"

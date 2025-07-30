@@ -5,8 +5,8 @@ use bincode::{Decode, Encode};
 use half::bf16;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
-use ndarray::{s, Array1, Array2, Array3, Axis};
-use numpy::PyArray2;
+use ndarray::{s, Array1, Array2, Array3, ArrayD, Axis};
+use numpy::{Ix2, PyArray2};
 use pyo3::prelude::*;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::io::{Read, Seek, Write};
@@ -80,7 +80,7 @@ impl Values {
     }
 
     fn decode(buffer: &[u8]) -> Result<Self> {
-        let data = lz4_flex::decompress_size_prepended(buffer).unwrap();
+        let data = decompress_data_zst(buffer);
         let data: Values = bincode::decode_from_slice::<_, Configuration>(
             &data,
             Configuration::default(),
@@ -90,7 +90,7 @@ impl Values {
 
     fn encode(self) -> Result<Vec<u8>> {
         let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
-        let data = lz4_flex::compress_prepend_size(&data);
+        let data = compress_data_zst(data);
         Ok(data)
     }
 }
@@ -147,8 +147,7 @@ impl Sequences {
     }
 
     fn decode(buffer: &[u8]) -> Result<Self> {
-        let mut seqs = lz4_flex::decompress_size_prepended(buffer)
-            .context("Failed to decompress sequences")?;
+        let mut seqs = decompress_data_zst(buffer);
         let seqs: Sequences = bincode::decode_from_slice::<_, Configuration>(
             &mut seqs,
             Configuration::default(),
@@ -327,7 +326,7 @@ impl DataChunk {
             .collect();
         let seqs = Sequences(Array2::from_shape_vec(shape, seqs?)?);
         let seqs = bincode::encode_to_vec::<_, Configuration>(seqs, Default::default())?;
-        let seqs = lz4_flex::compress_prepend_size(&seqs);
+        let seqs = compress_data_zst(seqs);
         std::fs::write(self.location.join("sequence.dat"), seqs)?;
         Ok(())
     }
@@ -378,6 +377,19 @@ impl DataStoreIndex {
             DataStoreIndex::Chunked((_, lengths)) => Box::new(lengths.iter().cloned()),
         }
     }
+}
+
+fn compress_data_zst(data: Vec<u8>) -> Vec<u8> {
+    let mut encoder = zstd::bulk::Compressor::new(9).unwrap();
+    encoder.multithread(16).unwrap();
+    encoder.compress(&data).unwrap()
+}
+
+fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
+    let mut decoder = zstd::Decoder::new(buffer).unwrap();
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data).unwrap();
+    decompressed_data
 }
 
 #[derive(Debug)]
@@ -452,7 +464,12 @@ impl DataStore {
         let index_file = location.as_ref().with_extension("index");
         let index = if index_file.exists() {
             let index_data = std::fs::read(index_file)?;
-            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0
+            if let Ok(i) = bincode::decode_from_slice(&index_data, bincode::config::standard()) {
+                i.0
+            } else {
+                let i: IndexMap<String, (usize, usize)> = bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
+                DataStoreIndex::KeyValue(i)
+            }
         } else {
             bail!("Data store index file not found at {}", index_file.display())
         };
@@ -490,7 +507,18 @@ impl DataStore {
             i
         }).collect();
         indices.into_par_iter()
-            .map(move |(i, n)| Values::decode(&buf[i..i+n]).unwrap())
+            .map(move |(i, n)| {
+                if let Ok(v) = Values::decode(&buf[i..i+n]) {
+                    v
+                } else {
+                    let data = decompress_data_zst(&buf[i..i+n]);
+                    let data: ArrayD<bf16> = bincode::serde::decode_from_slice::<_, Configuration>(
+                        &data,
+                        Configuration::default(),
+                    ).unwrap().0;
+                    Values(data.into_dimensionality::<Ix2>().unwrap().insert_axis(Axis(2)))
+                }
+            })
     }
 
     fn write_par(
@@ -523,10 +551,9 @@ impl DataStore {
         if chunk_size <= 1 {
             return Ok(());
         }
-        let keys: IndexSet<_> = if let DataStoreIndex::KeyValue(i) = &self.index {
-            i.keys().cloned().collect()
-        } else {
-            bail!("Cannot consolidate a chunked data store. Use a key-value store instead.");
+        let keys: IndexSet<_> = match &self.index {
+            DataStoreIndex::KeyValue(i) => i.keys().cloned().collect(),
+            DataStoreIndex::Chunked((keys, _)) => keys.clone(),
         };
 
         let arrs: Vec<_> = self.iter_chunks().chunks(chunk_size).map(|chunk| {
