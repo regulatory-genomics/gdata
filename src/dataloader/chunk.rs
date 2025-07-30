@@ -3,7 +3,7 @@ use bed_utils::bed::GenomicRange;
 use bincode::config::Configuration;
 use bincode::{Decode, Encode};
 use half::bf16;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayD, Axis};
 use numpy::{Ix2, PyArray2};
@@ -346,21 +346,21 @@ impl DataChunk {
 #[derive(Debug, Decode, Encode)]
 enum DataStoreIndex {
     KeyValue(#[bincode(with_serde)] IndexMap<String, (usize, usize)>),
-    Chunked(#[bincode(with_serde)] (IndexSet<String>, Vec<usize>)),
+    Chunked(#[bincode(with_serde)] (IndexMap<String, usize>, Vec<usize>)),
 }
 
 impl DataStoreIndex {
     fn contains_key(&self, key: &str) -> bool {
         match self {
             DataStoreIndex::KeyValue(index) => index.contains_key(key),
-            DataStoreIndex::Chunked((keys, _)) => keys.contains(key),
+            DataStoreIndex::Chunked((keys, _)) => keys.contains_key(key),
         }
     }
 
     fn keys(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
             DataStoreIndex::KeyValue(index) => Box::new(index.keys()),
-            DataStoreIndex::Chunked((keys, _)) => Box::new(keys.iter()),
+            DataStoreIndex::Chunked((keys, _)) => Box::new(keys.keys()),
         }
     }
 
@@ -551,11 +551,7 @@ impl DataStore {
         if chunk_size <= 1 {
             return Ok(());
         }
-        let keys: IndexSet<_> = match &self.index {
-            DataStoreIndex::KeyValue(i) => i.keys().cloned().collect(),
-            DataStoreIndex::Chunked((keys, _)) => keys.clone(),
-        };
-
+        let keys: IndexMap<_, _> = self.index.keys().cloned().enumerate().map(|(i, x)| (x, i % chunk_size)).collect();
         let arrs: Vec<_> = self.iter_chunks().chunks(chunk_size).map(|chunk| {
             let chunk = chunk.iter().map(|x| x.0.view()).collect::<Vec<_>>();
             let arr = ndarray::concatenate(Axis(2), &chunk).unwrap();
