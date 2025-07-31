@@ -8,8 +8,7 @@ use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayD, Axis};
 use numpy::{Ix2, PyArray2};
 use pyo3::prelude::*;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use std::collections::HashMap;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
@@ -307,14 +306,16 @@ impl DataChunk {
         let arrs: Vec<_> = self
             .data_store
             .iter_chunks()
-            .map(|mut data| {
-                if let Some(idx) = self.subset.as_ref() {
-                    data = Values(data.0.select(Axis(0), idx));
-                }
-                if let Some(split) = self.split_data {
-                    data = data.split(split.1).unwrap();
-                }
-                data
+            .flat_map_iter(|chunk| {
+                chunk.into_iter().map(|mut data| {
+                    if let Some(idx) = self.subset.as_ref() {
+                        data = Values(data.0.select(Axis(0), idx));
+                    }
+                    if let Some(split) = self.split_data {
+                        data = data.split(split.1).unwrap();
+                    }
+                    data
+                })
             })
             .collect();
         let arr_view = arrs.iter().map(|x| x.0.view()).collect::<Vec<_>>();
@@ -351,46 +352,20 @@ impl DataChunk {
     ) -> Result<()> {
         self.data_store.write_par(data)
     }
-
-    pub fn consolidate(&mut self, chunk_size: usize) -> Result<()> {
-        self.data_store.consolidate(chunk_size)
-    }
 }
 
 #[derive(Debug, Decode, Encode)]
-enum DataStoreIndex {
-    KeyValue(#[bincode(with_serde)] IndexMap<String, (usize, usize)>),
-    Chunked(#[bincode(with_serde)] (IndexMap<String, (usize, usize)>, Vec<(usize, usize)>)), // chunk index, bucket index
-}
+struct DataStoreIndex(#[bincode(with_serde)] IndexMap<String, (usize, usize)>);
 
 impl DataStoreIndex {
-    fn keys(&self) -> Box<dyn Iterator<Item = &String> + '_> {
-        match self {
-            DataStoreIndex::KeyValue(index) => Box::new(index.keys()),
-            DataStoreIndex::Chunked((keys, _)) => Box::new(keys.keys()),
-        }
+    fn keys(&self) -> impl Iterator<Item = &String> + '_ {
+        self.0.keys()
     }
 
-    /// (offset, size, bucket)
-    fn get(&self, key: &str) -> Option<(usize, usize, usize)> {
-        match self {
-            DataStoreIndex::KeyValue(index) => {
-                let (i, n) = index.get(key)?;
-                Some((*i, *n, 0))
-            }
-            DataStoreIndex::Chunked((keys, lengths)) => {
-                let (x, j) = keys.get(key)?;
-                let (i, n) = lengths[*x];
-                Some((i, n, *j))
-            }
-        }
-    }
-
-    fn chunk_lengths(&self) -> Box<dyn Iterator<Item = usize> + '_> {
-        match self {
-            DataStoreIndex::KeyValue(index) => Box::new(index.values().map(|(_, size)| *size)),
-            DataStoreIndex::Chunked((_, lengths)) => Box::new(lengths.iter().map(|x| x.1)),
-        }
+    /// (offset, size)
+    fn get(&self, key: &str) -> Option<(usize, usize)> {
+        let (i, n) = self.0.get(key)?;
+        Some((*i, *n))
     }
 }
 
@@ -433,7 +408,7 @@ impl DataStore {
 
         file.flush()?;
         let store = Self {
-            index: DataStoreIndex::KeyValue(index),
+            index: DataStoreIndex(index),
             file,
             location: location.as_ref().to_path_buf(),
         };
@@ -466,13 +441,7 @@ impl DataStore {
         let index_file = location.as_ref().with_extension("index");
         let index = if index_file.exists() {
             let index_data = std::fs::read(index_file)?;
-            if let Ok(i) = bincode::decode_from_slice(&index_data, bincode::config::standard()) {
-                i.0
-            } else {
-                let i: IndexMap<String, (usize, usize)> =
-                    bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
-                DataStoreIndex::KeyValue(i)
-            }
+            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0
         } else {
             bail!(
                 "Data store index file not found at {}",
@@ -487,50 +456,28 @@ impl DataStore {
     }
 
     fn read_keys(&mut self, keys: &[String]) -> Values {
-        let mut chunks = HashMap::new();
-        keys.iter().for_each(|key| {
-            let (offset, size, _) = self.index.get(key).unwrap();
-            if !chunks.contains_key(&offset) {
+        let result = keys
+            .iter()
+            .map(|key| {
+                let (offset, size) = self.index.get(key).unwrap();
                 self.file
                     .seek(std::io::SeekFrom::Start(offset as u64))
                     .unwrap();
                 let mut buffer = vec![0; size];
                 self.file.read_exact(&mut buffer).unwrap();
-                let data = Values::decode(&buffer).unwrap().0;
-                chunks.insert(offset, data);
-            }
-        });
-        let result: Vec<_> = keys
-            .iter()
-            .map(|key| {
-                let (offset, _, bucket) = self.index.get(key).unwrap();
-                let c = chunks.get(&offset).unwrap();
-                c.slice(s![.., .., bucket..bucket + 1])
+                Values::decode(&buffer).unwrap().0
             })
-            .collect();
-
+            .collect::<Vec<_>>();
+        let result = result.iter().map(|x| x.view()).collect::<Vec<_>>();
         Values(ndarray::concatenate(Axis(2), &result).unwrap())
     }
 
-    fn iter_chunks(&mut self) -> impl IndexedParallelIterator<Item = Values> + '_ {
-        self.file.rewind().unwrap();
-        let mut buf = Vec::new();
-        self.file.read_to_end(&mut buf).unwrap();
-        let mut acc = 0;
-        let indices: Vec<_> = self
-            .index
-            .chunk_lengths()
-            .map(move |n| {
-                let i = (acc, n);
-                acc += n;
-                i
-            })
-            .collect();
-        indices.into_par_iter().map(move |(i, n)| {
-            if let Ok(v) = Values::decode(&buf[i..i + n]) {
+    fn iter_chunks(&mut self) -> impl ParallelIterator<Item = Vec<Values>> + '_ {
+        fn decode_maybe(raw: &[u8]) -> Values {
+            if let Ok(v) = Values::decode(raw) {
                 v
             } else {
-                let data = decompress_data_zst(&buf[i..i + n]);
+                let data = decompress_data_zst(raw);
                 let data: ArrayD<bf16> = bincode::serde::decode_from_slice::<_, Configuration>(
                     &data,
                     Configuration::default(),
@@ -543,6 +490,24 @@ impl DataStore {
                         .insert_axis(Axis(2)),
                 )
             }
+        }
+
+        self.file.rewind().unwrap();
+        let mut buf = Vec::new();
+        self.file.read_to_end(&mut buf).unwrap();
+        let chunks: Vec<Vec<_>> = self
+            .index
+            .0
+            .values()
+            .chunks(256)
+            .into_iter()
+            .map(|x| x.collect())
+            .collect();
+
+        chunks.into_par_iter().map(move |c| {
+            c.into_iter()
+                .map(|&(i, n)| decode_maybe(&buf[i..i + n]))
+                .collect::<Vec<_>>()
         })
     }
 
@@ -550,66 +515,20 @@ impl DataStore {
         &mut self,
         data: impl IntoParallelIterator<Item = (String, Values)>,
     ) -> Result<()> {
-        if let DataStoreIndex::KeyValue(index) = &mut self.index {
-            let mut offset = self.file.seek(std::io::SeekFrom::End(0))? as usize;
-            let data: Vec<_> = data
-                .into_par_iter()
-                .map(|(key, values)| (key, values.encode().unwrap()))
-                .collect();
-            data.into_iter().for_each(|(key, buffer)| {
-                let size = buffer.len();
-                self.file.write_all(&buffer).unwrap();
-                index.insert(key, (offset, size));
-                offset += size;
-            });
-            self.file.flush()?;
-            self.write_index()?;
-            Ok(())
-        } else {
-            bail!("Cannot write to a chunked data store. Use a key-value store instead.");
-        }
-    }
-
-    /// Consolidate the data store by combining all entries into a single array for
-    /// faster loading and reduced file size.
-    fn consolidate(&mut self, chunk_size: usize) -> Result<()> {
-        let keys: IndexMap<_, _> = self
-            .index
-            .keys()
-            .cloned()
-            .enumerate()
-            .map(|(i, x)| (x, (i / chunk_size, i % chunk_size)))
+        let index = &mut self.index.0;
+        let mut offset = self.file.seek(std::io::SeekFrom::End(0))? as usize;
+        let data: Vec<_> = data
+            .into_par_iter()
+            .map(|(key, values)| (key, values.encode().unwrap()))
             .collect();
-        let arrs: Vec<_> = self
-            .iter_chunks()
-            .chunks(chunk_size)
-            .map(|chunk| {
-                let chunk = chunk.iter().map(|x| x.0.view()).collect::<Vec<_>>();
-                let arr = ndarray::concatenate(Axis(2), &chunk).unwrap();
-                Values(arr).encode().unwrap()
-            })
-            .collect();
-
-        self.file.set_len(0)?;
-        self.file.rewind()?;
-
-        let mut acc = 0;
-        let index: Vec<_> = arrs
-            .into_iter()
-            .map(|data| {
-                let r = (acc, data.len());
-                self.file.write_all(&data).unwrap();
-                acc += data.len();
-                r
-            })
-            .collect();
-        let index = DataStoreIndex::Chunked((keys, index));
-        let index_file = self.location.with_extension("index");
-        let index_data = bincode::encode_to_vec::<_, Configuration>(&index, Default::default())?;
-        std::fs::write(index_file, index_data)?;
+        data.into_iter().for_each(|(key, buffer)| {
+            let size = buffer.len();
+            self.file.write_all(&buffer).unwrap();
+            index.insert(key, (offset, size));
+            offset += size;
+        });
         self.file.flush()?;
-        self.index = index;
-
+        self.write_index()?;
         Ok(())
     }
 }

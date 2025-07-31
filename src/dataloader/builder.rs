@@ -12,7 +12,7 @@ use noodles::fasta::{
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use rand::rngs::ThreadRng;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufReader;
@@ -128,20 +128,6 @@ impl GenomeDataBuilder {
             resolution,
             seq_index: index,
         })
-    }
-
-    pub fn finish_with(&self, n: usize) -> Result<()> {
-        self.seq_index
-            .iter_chunks::<ThreadRng>(None, None, true, None)
-            .chunks(8)
-            .into_iter()
-            .for_each(|chunk| {
-                chunk
-                    .collect::<Vec<_>>()
-                    .into_par_iter()
-                    .for_each(|mut c| c.consolidate(n).unwrap());
-            });
-        Ok(())
     }
 }
 
@@ -462,10 +448,6 @@ impl GenomeDataBuilder {
     )]
     pub fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
         self.add_files(IndexMap::from([(key.to_string(), w5z)]))
-    }
-
-    pub fn finish(&self) -> Result<()> {
-        self.finish_with(128)
     }
 }
 

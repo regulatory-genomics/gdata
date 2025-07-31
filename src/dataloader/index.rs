@@ -1,13 +1,16 @@
 use anyhow::Result;
 use bed_utils::bed::{map::GIntervalMap, GenomicRange};
+use half::bf16;
 use itertools::Itertools;
+use ndarray::Array3;
 use rand::{seq::SliceRandom, Rng};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
-use crate::dataloader::chunk::DataChunk;
+use crate::dataloader::chunk::{DataChunk, Sequences};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ChunkInfo {
@@ -108,6 +111,50 @@ impl ChunkIndex {
             }
             chunk
         })
+    }
+
+    pub fn iter_chunk_data<R: Rng>(
+        &self,
+        split_data: Option<(usize, usize)>,
+        trim_target: Option<usize>,
+        scale: Option<f32>,
+        clamp_max: Option<f32>, 
+        shuffle: Option<&mut R>,
+        prefetch: usize,
+    ) -> impl Iterator<Item = (Sequences, Array3<f32>)> {
+        let mut chunks: Vec<_> = self
+            .0
+            .values()
+            .sorted()
+            .chunk_by(|x| x.0.clone())
+            .into_iter()
+            .map(|(chunk, group)| {
+                let idx = group.into_iter().map(|(_, i)| *i).collect::<Vec<_>>();
+                (chunk, idx)
+            })
+            .collect();
+        if let Some(rng) = shuffle {
+            chunks.shuffle(rng);
+        }
+        let chunks: Vec<_> = chunks.into_iter().chunks(prefetch).into_iter().map(|x| x.collect::<Vec<_>>()).collect();
+        let scale = scale.map(bf16::from_f32);
+        let clamp_max = clamp_max.map(bf16::from_f32);
+        chunks.into_iter().flat_map(move |group| group.into_par_iter().map(move |(chunk, idx)| {
+            let mut chunk = chunk.open(true).unwrap();
+            chunk.subset(idx.clone()).unwrap();
+            if let Some(trim_target) = trim_target {
+                chunk.set_trim_target(trim_target);
+            }
+            if let Some(split_data) = split_data {
+                chunk.set_split_data(split_data);
+            }
+
+            let seqs = chunk.get_seqs().unwrap();
+            let mut values = chunk.read_all();
+            values.transform(scale, clamp_max);
+            (seqs, values.0.mapv(|x| x.to_f32()))
+        }).collect::<Vec<_>>()
+        )
     }
 }
 

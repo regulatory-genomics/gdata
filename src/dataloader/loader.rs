@@ -3,12 +3,11 @@ use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array, Array1, Array2, ArrayD, Dimension, Ix2};
+use ndarray::{Array, Array1, Array2, Array3, ArrayD, Dimension, Ix2};
 use numpy::{PyArray1, PyArray2, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -16,7 +15,7 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::dataloader::builder::GenomeDataBuilder;
-use crate::dataloader::chunk::{DataChunk, Sequences};
+use crate::dataloader::chunk::Sequences;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -124,7 +123,8 @@ impl std::fmt::Display for GenomeDataLoader {
 impl GenomeDataLoader {
     pub fn len(&self) -> usize {
         let mut n = self.builder.seq_index.len();
-        let multiply_by = self.builder.window_size / self.window_size.unwrap_or(self.builder.window_size);
+        let multiply_by =
+            self.builder.window_size / self.window_size.unwrap_or(self.builder.window_size);
         n *= multiply_by as usize;
         n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
     }
@@ -191,22 +191,23 @@ impl GenomeDataLoader {
         } else {
             None
         };
+        let chunks = self.builder.seq_index.iter_chunk_data(
+            split_data,
+            self.trim_target
+                .map(|t| t / self.builder.resolution as usize),
+            self.scale,
+            self.clamp_max,
+            shuffle,
+            self.prefetch,
+        );
+
         DataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
                     batch_size: self.batch_size,
                     buffer_seq: Buffer::new(),
                     buffer_data: Buffer::new(),
-                    scale: self.scale.map(bf16::from_f32),
-                    clamp_max: self.clamp_max.map(bf16::from_f32),
-                    chunks: self.builder.seq_index.iter_chunks(
-                        split_data,
-                        self.trim_target
-                            .map(|t| t / self.builder.resolution as usize),
-                        false,
-                        shuffle,
-                    ),
-                    num_parallel_job: self.prefetch,
+                    chunks: PrefethIterator::new(chunks, self.prefetch),
                 },
                 self.prefetch * self.builder.get_chunk_size() / self.batch_size,
             ),
@@ -707,48 +708,18 @@ struct _DataLoaderIter<T> {
     batch_size: usize,
     buffer_seq: Buffer<u8>,
     buffer_data: Buffer<f32>,
-    scale: Option<bf16>,
-    clamp_max: Option<bf16>,
     chunks: T,
-    num_parallel_job: usize,
 }
 
-impl<T: Iterator<Item = DataChunk>> _DataLoaderIter<T> {
-    fn load_chunks(&mut self) -> Option<usize> {
-        let chunks: Vec<_> = std::iter::repeat_with(|| self.chunks.next())
-            .take(self.num_parallel_job)
-            .flatten()
-            .collect();
-        if chunks.is_empty() {
-            return None;
-        }
-
-        let data: Vec<_> = chunks
-            .into_par_iter()
-            .map(|mut chunk| {
-                let seqs = chunk.get_seqs().unwrap();
-                let mut values = chunk.read_all();
-                values.transform(self.scale, self.clamp_max);
-                (seqs.0, values.0.mapv(|x| x.to_f32()))
-            })
-            .collect();
-
-        let n_read = data.len();
-        data.into_iter().for_each(|(seqs, values)| {
-            self.buffer_seq.add(seqs);
-            self.buffer_data.add(values);
-        });
-        Some(n_read)
-    }
-}
-
-impl<T: Iterator<Item = DataChunk>> Iterator for _DataLoaderIter<T> {
+impl<T: Iterator<Item = (Sequences, Array3<f32>)>> Iterator for _DataLoaderIter<T> {
     type Item = (Sequences, ArrayD<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let n_buffer = self.buffer_data.remaining();
         if n_buffer < self.batch_size {
-            if let Some(_) = self.load_chunks() {
+            if let Some((seqs, values)) = self.chunks.next() {
+                self.buffer_seq.add(seqs.0);
+                self.buffer_data.add(values);
                 self.next()
             } else {
                 if n_buffer == 0 {

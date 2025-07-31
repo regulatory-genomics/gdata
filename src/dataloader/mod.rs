@@ -116,7 +116,6 @@ mod tests {
         .unwrap();
         builder.add_file("data1", w5z1).unwrap();
         builder.add_file("data2", w5z2).unwrap();
-        builder.finish_with(2).unwrap();
         (path.join("builder"), fasta)
     }
 
