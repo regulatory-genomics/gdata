@@ -9,6 +9,7 @@ use ndarray::{s, Array1, Array2, Array3, ArrayD, Axis};
 use numpy::{Ix2, PyArray2};
 use pyo3::prelude::*;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
@@ -24,7 +25,11 @@ impl Values {
         let (d, h, w) = self.0.dim();
 
         if size == 0 || h % size != 0 {
-            bail!("Cannot split values into chunks of size {}: length {} is not a multiple of size", size, h);
+            bail!(
+                "Cannot split values into chunks of size {}: length {} is not a multiple of size",
+                size,
+                h
+            );
         }
 
         let num_chunks = h / size;
@@ -38,7 +43,8 @@ impl Values {
         // Reshape again to the final 3D shape by collapsing the first two dimensions.
         let final_shape = (d * num_chunks, size, w);
 
-        let result = self.0
+        let result = self
+            .0
             .into_shape_with_order(intermediate_shape)?
             .into_shape_with_order(final_shape)?;
 
@@ -73,23 +79,21 @@ impl Values {
         })
     }
 
-    fn trim(self, trim_target: usize) -> Self {
-        let (_, h, _) = self.0.dim();
-        let trimmed = self.0.slice(s![.., trim_target..h - trim_target, ..]).to_owned();
-        Values(trimmed)
-    }
-
     fn decode(buffer: &[u8]) -> Result<Self> {
         let data = decompress_data_zst(buffer);
-        let data: Values = bincode::decode_from_slice::<_, Configuration>(
-            &data,
-            Configuration::default(),
-        )?.0;
-        Ok(data)
+        let data: Values =
+            bincode::decode_from_slice::<_, Configuration>(&data, Configuration::default())?.0;
+        let data = data.0.permuted_axes([1, 2, 0]); // Permute the axes back
+        Ok(Values(data.as_standard_layout().to_owned()))
     }
 
     fn encode(self) -> Result<Vec<u8>> {
-        let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
+        // Permute the axes to offer better compression ratio, as the second axis
+        // is least variable, followed by the first, and the third is most variable.
+        let data = bincode::encode_to_vec::<_, Configuration>(
+            Values(self.0.permuted_axes([2, 0, 1])),
+            Configuration::default(),
+        )?;
         let data = compress_data_zst(data);
         Ok(data)
     }
@@ -113,19 +117,23 @@ impl Sequences {
         let (d, h) = self.0.dim();
 
         if size == 0 || h % size != 0 {
-            bail!("Cannot split values into chunks of size {}: length {} is not a multiple of size", size, h);
+            bail!(
+                "Cannot split values into chunks of size {}: length {} is not a multiple of size",
+                size,
+                h
+            );
         }
 
         let num_chunks = h / size;
         let intermediate_shape = (d, num_chunks, size);
         let final_shape = (d * num_chunks, size);
 
-        let result = self.0
+        let result = self
+            .0
             .into_shape_with_order(intermediate_shape)?
             .into_shape_with_order(final_shape)?;
 
         Ok(Self(result))
- 
     }
 
     pub fn iter_rows(&self) -> impl DoubleEndedIterator<Item = Array1<u8>> + '_ {
@@ -137,7 +145,8 @@ impl Sequences {
     }
 
     pub fn into_strings(self) -> Vec<String> {
-        self.0.rows()
+        self.0
+            .rows()
             .into_iter()
             .map(|row| {
                 let row: Vec<_> = row.iter().map(|x| decode_nucleotide(*x).unwrap()).collect();
@@ -148,10 +157,8 @@ impl Sequences {
 
     fn decode(buffer: &[u8]) -> Result<Self> {
         let mut seqs = decompress_data_zst(buffer);
-        let seqs: Sequences = bincode::decode_from_slice::<_, Configuration>(
-            &mut seqs,
-            Configuration::default(),
-        )?.0;
+        let seqs: Sequences =
+            bincode::decode_from_slice::<_, Configuration>(&mut seqs, Configuration::default())?.0;
         Ok(seqs)
     }
 }
@@ -165,12 +172,12 @@ impl Sequences {
 #[pyclass]
 #[derive(Debug)]
 pub struct DataChunk {
-    location: PathBuf,  // Path to the chunk's directory
-    pub(crate) segments: Vec<GenomicRange>,  // Genomic segments contained in this chunk
-    trim_target: Option<usize>,  // Output trimming
-    split_data: Option<(usize, usize)>, // Optional size for splitting data
-    data_store: DataStore,  // Data store
-    subset: Option<Vec<usize>>,  // Optional indices representing a subset of the data
+    location: PathBuf,                      // Path to the chunk's directory
+    pub(crate) segments: Vec<GenomicRange>, // Genomic segments contained in this chunk
+    trim_target: Option<usize>,             // Output trimming
+    split_data: Option<(usize, usize)>,     // Optional size for splitting data
+    data_store: DataStore,                  // Data store
+    subset: Option<Vec<usize>>,             // Optional indices representing a subset of the data
 }
 
 impl DataChunk {
@@ -231,10 +238,7 @@ impl DataChunk {
             bail!("Cannot create subset with empty indices");
         }
 
-        let segments: Vec<_> = indices
-            .iter()
-            .map(|&i| self.segments[i].clone())
-            .collect();
+        let segments: Vec<_> = indices.iter().map(|&i| self.segments[i].clone()).collect();
         if segments.len() != self.segments.len() {
             self.segments = segments;
             self.subset = Some(indices);
@@ -280,36 +284,46 @@ impl DataChunk {
         Ok(seq)
     }
 
-    pub fn get(&mut self, key: &str) -> Result<Option<Values>> {
-        let result = if let Some(mut data) = self.data_store.read_with(key, self.trim_target)? {
-            if let Some(idx) = self.subset.as_ref() {
-                data = data.select_rows(idx);
-            }
-            if let Some(split_data) = self.split_data {
-                data = data.split(split_data.1)?;
-            }
-            Some(data)
+    pub fn read_keys(&mut self, keys: &[String]) -> Result<Values> {
+        let mut data = self.data_store.read_keys(keys);
+        if let Some(idx) = self.subset.as_ref() {
+            data = data.select_rows(idx);
+        }
+        if let Some(split_data) = self.split_data {
+            data = data.split(split_data.1)?;
+        }
+        let mut arr = data.0;
+        if let Some(trim_target) = self.trim_target {
+            arr = arr
+                .slice(s![.., trim_target..arr.dim().1 - trim_target, ..])
+                .to_owned()
         } else {
-            None
+            arr = arr.as_standard_layout().to_owned()
         };
-        Ok(result)
+        Ok(Values(arr))
     }
 
     pub fn read_all(&mut self) -> Values {
-        let arrs: Vec<_> = self.data_store.iter_chunks().map(|mut data| {
-            if let Some(idx) = self.subset.as_ref() {
-                data = Values(data.0.select(Axis(0), idx));
-            }
-            if let Some(split) = self.split_data {
-                data = data.split(split.1).unwrap();
-            }
-            data
-        }).collect();
-        let arr_view  = arrs.iter().map(|x| x.0.view()).collect::<Vec<_>>();
+        let arrs: Vec<_> = self
+            .data_store
+            .iter_chunks()
+            .map(|mut data| {
+                if let Some(idx) = self.subset.as_ref() {
+                    data = Values(data.0.select(Axis(0), idx));
+                }
+                if let Some(split) = self.split_data {
+                    data = data.split(split.1).unwrap();
+                }
+                data
+            })
+            .collect();
+        let arr_view = arrs.iter().map(|x| x.0.view()).collect::<Vec<_>>();
         let mut data = ndarray::concatenate(Axis(2), &arr_view).unwrap();
 
         if let Some(trim_target) = self.trim_target {
-            data = data.slice(s![.., trim_target..data.dim().1 - trim_target, ..]).to_owned()
+            data = data
+                .slice(s![.., trim_target..data.dim().1 - trim_target, ..])
+                .to_owned()
         } else {
             data = data.as_standard_layout().to_owned()
         };
@@ -346,17 +360,10 @@ impl DataChunk {
 #[derive(Debug, Decode, Encode)]
 enum DataStoreIndex {
     KeyValue(#[bincode(with_serde)] IndexMap<String, (usize, usize)>),
-    Chunked(#[bincode(with_serde)] (IndexMap<String, usize>, Vec<usize>)),
+    Chunked(#[bincode(with_serde)] (IndexMap<String, (usize, usize)>, Vec<(usize, usize)>)), // chunk index, bucket index
 }
 
 impl DataStoreIndex {
-    fn contains_key(&self, key: &str) -> bool {
-        match self {
-            DataStoreIndex::KeyValue(index) => index.contains_key(key),
-            DataStoreIndex::Chunked((keys, _)) => keys.contains_key(key),
-        }
-    }
-
     fn keys(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
             DataStoreIndex::KeyValue(index) => Box::new(index.keys()),
@@ -364,32 +371,27 @@ impl DataStoreIndex {
         }
     }
 
-    fn get(&self, key: &str) -> Option<&(usize, usize)> {
+    /// (offset, size, bucket)
+    fn get(&self, key: &str) -> Option<(usize, usize, usize)> {
         match self {
-            DataStoreIndex::KeyValue(index) => index.get(key),
-            _ => todo!(),
+            DataStoreIndex::KeyValue(index) => {
+                let (i, n) = index.get(key)?;
+                Some((*i, *n, 0))
+            }
+            DataStoreIndex::Chunked((keys, lengths)) => {
+                let (x, j) = keys.get(key)?;
+                let (i, n) = lengths[*x];
+                Some((i, n, *j))
+            }
         }
     }
 
     fn chunk_lengths(&self) -> Box<dyn Iterator<Item = usize> + '_> {
         match self {
             DataStoreIndex::KeyValue(index) => Box::new(index.values().map(|(_, size)| *size)),
-            DataStoreIndex::Chunked((_, lengths)) => Box::new(lengths.iter().cloned()),
+            DataStoreIndex::Chunked((_, lengths)) => Box::new(lengths.iter().map(|x| x.1)),
         }
     }
-}
-
-fn compress_data_zst(data: Vec<u8>) -> Vec<u8> {
-    let mut encoder = zstd::bulk::Compressor::new(9).unwrap();
-    encoder.multithread(16).unwrap();
-    encoder.compress(&data).unwrap()
-}
-
-fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
-    let mut decoder = zstd::Decoder::new(buffer).unwrap();
-    let mut decompressed_data = Vec::new();
-    decoder.read_to_end(&mut decompressed_data).unwrap();
-    decompressed_data
 }
 
 #[derive(Debug)]
@@ -467,11 +469,15 @@ impl DataStore {
             if let Ok(i) = bincode::decode_from_slice(&index_data, bincode::config::standard()) {
                 i.0
             } else {
-                let i: IndexMap<String, (usize, usize)> = bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
+                let i: IndexMap<String, (usize, usize)> =
+                    bincode::serde::decode_from_slice(&index_data, bincode::config::standard())?.0;
                 DataStoreIndex::KeyValue(i)
             }
         } else {
-            bail!("Data store index file not found at {}", index_file.display())
+            bail!(
+                "Data store index file not found at {}",
+                index_file.display()
+            )
         };
         Ok(Self {
             index,
@@ -480,20 +486,30 @@ impl DataStore {
         })
     }
 
-    fn read_with(&mut self, key: &str, trim_target: Option<usize>) -> Result<Option<Values>> {
-        if !self.index.contains_key(key) {
-            return Ok(None);
-        }
+    fn read_keys(&mut self, keys: &[String]) -> Values {
+        let mut chunks = HashMap::new();
+        keys.iter().for_each(|key| {
+            let (offset, size, _) = self.index.get(key).unwrap();
+            if !chunks.contains_key(&offset) {
+                self.file
+                    .seek(std::io::SeekFrom::Start(offset as u64))
+                    .unwrap();
+                let mut buffer = vec![0; size];
+                self.file.read_exact(&mut buffer).unwrap();
+                let data = Values::decode(&buffer).unwrap().0;
+                chunks.insert(offset, data);
+            }
+        });
+        let result: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let (offset, _, bucket) = self.index.get(key).unwrap();
+                let c = chunks.get(&offset).unwrap();
+                c.slice(s![.., .., bucket..bucket + 1])
+            })
+            .collect();
 
-        let (offset, size) = self.index.get(key).unwrap();
-        self.file.seek(std::io::SeekFrom::Start(*offset as u64))?;
-        let mut buffer = vec![0; *size];
-        self.file.read_exact(&mut buffer)?;
-        let mut data = Values::decode(&buffer)?;
-        if let Some(trim_target) = trim_target {
-            data = data.trim(trim_target);
-        }
-        Ok(Some(data))
+        Values(ndarray::concatenate(Axis(2), &result).unwrap())
     }
 
     fn iter_chunks(&mut self) -> impl IndexedParallelIterator<Item = Values> + '_ {
@@ -501,24 +517,33 @@ impl DataStore {
         let mut buf = Vec::new();
         self.file.read_to_end(&mut buf).unwrap();
         let mut acc = 0;
-        let indices: Vec<_> = self.index.chunk_lengths().map(move |n| {
-            let i = (acc, n);
-            acc += n;
-            i
-        }).collect();
-        indices.into_par_iter()
-            .map(move |(i, n)| {
-                if let Ok(v) = Values::decode(&buf[i..i+n]) {
-                    v
-                } else {
-                    let data = decompress_data_zst(&buf[i..i+n]);
-                    let data: ArrayD<bf16> = bincode::serde::decode_from_slice::<_, Configuration>(
-                        &data,
-                        Configuration::default(),
-                    ).unwrap().0;
-                    Values(data.into_dimensionality::<Ix2>().unwrap().insert_axis(Axis(2)))
-                }
+        let indices: Vec<_> = self
+            .index
+            .chunk_lengths()
+            .map(move |n| {
+                let i = (acc, n);
+                acc += n;
+                i
             })
+            .collect();
+        indices.into_par_iter().map(move |(i, n)| {
+            if let Ok(v) = Values::decode(&buf[i..i + n]) {
+                v
+            } else {
+                let data = decompress_data_zst(&buf[i..i + n]);
+                let data: ArrayD<bf16> = bincode::serde::decode_from_slice::<_, Configuration>(
+                    &data,
+                    Configuration::default(),
+                )
+                .unwrap()
+                .0;
+                Values(
+                    data.into_dimensionality::<Ix2>()
+                        .unwrap()
+                        .insert_axis(Axis(2)),
+                )
+            }
+        })
     }
 
     fn write_par(
@@ -548,28 +573,41 @@ impl DataStore {
     /// Consolidate the data store by combining all entries into a single array for
     /// faster loading and reduced file size.
     fn consolidate(&mut self, chunk_size: usize) -> Result<()> {
-        if chunk_size <= 1 {
-            return Ok(());
-        }
-        let keys: IndexMap<_, _> = self.index.keys().cloned().enumerate().map(|(i, x)| (x, i % chunk_size)).collect();
-        let arrs: Vec<_> = self.iter_chunks().chunks(chunk_size).map(|chunk| {
-            let chunk = chunk.iter().map(|x| x.0.view()).collect::<Vec<_>>();
-            let arr = ndarray::concatenate(Axis(2), &chunk).unwrap();
-            Values(arr).encode().unwrap()
-        }).collect();
+        let keys: IndexMap<_, _> = self
+            .index
+            .keys()
+            .cloned()
+            .enumerate()
+            .map(|(i, x)| (x, (i / chunk_size, i % chunk_size)))
+            .collect();
+        let arrs: Vec<_> = self
+            .iter_chunks()
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let chunk = chunk.iter().map(|x| x.0.view()).collect::<Vec<_>>();
+                let arr = ndarray::concatenate(Axis(2), &chunk).unwrap();
+                Values(arr).encode().unwrap()
+            })
+            .collect();
 
         self.file.set_len(0)?;
         self.file.rewind()?;
 
-        let index: Vec<_> = arrs.into_iter().map(|data| {
-            let n = data.len();
-            self.file.write_all(&data).unwrap();
-            n
-        }).collect();
+        let mut acc = 0;
+        let index: Vec<_> = arrs
+            .into_iter()
+            .map(|data| {
+                let r = (acc, data.len());
+                self.file.write_all(&data).unwrap();
+                acc += data.len();
+                r
+            })
+            .collect();
         let index = DataStoreIndex::Chunked((keys, index));
         let index_file = self.location.with_extension("index");
-        let index_data = bincode::encode_to_vec(&index, bincode::config::standard())?;
+        let index_data = bincode::encode_to_vec::<_, Configuration>(&index, Default::default())?;
         std::fs::write(index_file, index_data)?;
+        self.file.flush()?;
         self.index = index;
 
         Ok(())
@@ -598,4 +636,18 @@ pub(crate) fn decode_nucleotide(base: u8) -> Result<u8> {
         _ => bail!("Invalid DNA base: {}", base),
     };
     Ok(b)
+}
+
+fn compress_data_zst(data: Vec<u8>) -> Vec<u8> {
+    zstd::bulk::Compressor::new(9)
+        .unwrap()
+        .compress(&data)
+        .unwrap()
+}
+
+fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
+    let mut decoder = zstd::Decoder::new(buffer).unwrap();
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data).unwrap();
+    decompressed_data
 }

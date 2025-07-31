@@ -3,8 +3,8 @@ use bed_utils::bed::GenomicRange;
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array, Array1, ArrayD, Dimension, Ix2};
-use numpy::{PyArray1, PyArrayDyn};
+use ndarray::{Array, Array1, Array2, ArrayD, Dimension, Ix2};
+use numpy::{PyArray1, PyArray2, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
@@ -860,23 +860,20 @@ impl SeqIndexer {
 pub struct DataIndexer(Py<GenomeDataLoader>);
 
 impl DataIndexer {
-    fn get(&self, py: Python<'_>, key: &str, j: &[String]) -> Result<ArrayD<bf16>> {
+    fn get(&self, py: Python<'_>, key: &str, j: &[String]) -> Result<Array2<bf16>> {
         let py_ref = self.0.borrow(py);
         let (chunk, i) = py_ref
             .builder
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        todo!()
-        /*
-        let vals = chunk.open(false)?.gets(j)?;
+        let vals = chunk.open(false)?.read_keys(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))
             .nth(*i)
             .unwrap()
             .to_owned())
-            */
     }
 }
 
@@ -886,7 +883,7 @@ impl DataIndexer {
         &'a self,
         py: Python<'a>,
         key: Bound<'a, PyAny>,
-    ) -> Result<Bound<'a, PyArrayDyn<f32>>> {
+    ) -> Result<Bound<'a, PyArray2<f32>>> {
         let (i, j): (String, Bound<'_, PyAny>) = key.extract()?;
         let j = if let Ok(j_) = j.extract::<String>() {
             vec![j_]
@@ -895,7 +892,7 @@ impl DataIndexer {
         };
 
         let data = self.get(py, &i, &j)?.mapv(|x| x.to_f32());
-        Ok(PyArrayDyn::from_owned_array(py, data))
+        Ok(PyArray2::from_owned_array(py, data))
     }
 }
 
