@@ -495,7 +495,7 @@ impl GenomeDataLoader {
         tracks: Bound<'_, PyAny>,
         savefig: Option<PathBuf>,
     ) -> Result<()> {
-        let highlight_start = slf.trim_target.map(|d| d as u64 / slf.builder.resolution);
+        let trim = slf.trim_target.unwrap_or(0);
         let data_indexer = Self::data(slf);
         let key = (region, &tracks).into_pyobject(py)?.into_any();
         let signal_values = data_indexer.__getitem__(py, key)?;
@@ -506,6 +506,9 @@ from matplotlib import pyplot as plt
 height_per_track = 1.5
 width = 8
 
+start, end = region.split(":")[1].split('-')
+start = int(start) + trim
+end = int(end) - trim
 signal_values = signal_values.T
 n_tracks, n_points = signal_values.shape
 fig, axes = plt.subplots(n_tracks, 1, figsize=[width, n_tracks * height_per_track], sharex=True)
@@ -515,13 +518,11 @@ if n_tracks == 1:
 
 for i, (ax, signal) in enumerate(zip(axes, signal_values)):
     ax.fill_between(range(n_points), 0, signal, color='black')
-    if highlight_start is not None:
-        ax.axvspan(highlight_start, n_points-highlight_start, color='red', alpha=0.2)
     ax.set_title(track_names[i], fontsize=7)
     ax.spines[['top', 'right']].set_visible(False)
 
 axes[-1].set_xticks([0, n_points - 1])
-axes[-1].set_xticklabels(["start", "end"])
+axes[-1].set_xticklabels([str(start), str(end)])
 axes[-1].set_xlabel(region)
 
 plt.tight_layout()
@@ -530,7 +531,7 @@ if savefig is None:
 else:
     plt.savefig(savefig, dpi=300, bbox_inches='tight')
 "#;
-        py_run!(py, region track_names signal_values highlight_start savefig, py_code);
+        py_run!(py, trim region track_names signal_values savefig, py_code);
 
         Ok(())
     }
@@ -838,7 +839,9 @@ impl SeqIndexer {
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        Ok(chunk.open(&Default::default())?.get_seq_at(*i)?)
+        let mut opts = py_ref.get_read_chunk_opts();
+        opts.split_data = None;  // Do not split data
+        Ok(chunk.open(&opts)?.get_seq_at(*i)?)
     }
 }
 
@@ -869,7 +872,9 @@ impl DataIndexer {
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let vals = chunk.open(&Default::default())?.read_keys(j)?;
+        let mut opts = py_ref.get_read_chunk_opts();
+        opts.split_data = None;  // Do not split data
+        let vals = chunk.open(&opts)?.read_keys(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))
