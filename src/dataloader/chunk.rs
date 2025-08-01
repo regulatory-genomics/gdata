@@ -78,19 +78,35 @@ impl Values {
         })
     }
 
+    /// Aggregate the values along the sequence axis (axis 1).
+    fn aggregate_by_length(self, size: usize) -> Self {
+        let (d, h, w) = self.0.dim();
+        if h % size != 0 {
+            panic!(
+                "Cannot aggregate values of length {} by size {}: length is not a multiple of size",
+                h, size
+            );
+        }
+        let num_chunks = h / size;
+        let data = self.0.into_shape_with_order((d, num_chunks, size, w))
+            .unwrap()
+            .mapv(|x| x.to_f64())
+            .mean_axis(Axis(2))
+            .unwrap()
+            .mapv(|x| bf16::from_f64(x));
+        Values(data)
+    }
+
     fn decode(buffer: &[u8]) -> Result<Self> {
         let data = decompress_data_zst(buffer);
-        let data: Values =
-            bincode::decode_from_slice::<_, Configuration>(&data, Configuration::default())?.0;
-        let data = data.0.permuted_axes([1, 2, 0]); // Permute the axes back
-        Ok(Values(data.as_standard_layout().to_owned()))
+        Ok(bincode::decode_from_slice::<_, Configuration>(&data, Configuration::default())?.0)
     }
 
     fn encode(self) -> Result<Vec<u8>> {
         // Permute the axes to offer better compression ratio, as the second axis
         // is least variable, followed by the first, and the third is most variable.
         let data = bincode::encode_to_vec::<_, Configuration>(
-            Values(self.0.permuted_axes([2, 0, 1])),
+            self,
             Configuration::default(),
         )?;
         let data = compress_data_zst(data);
@@ -174,7 +190,7 @@ pub struct DataChunk {
     location: PathBuf,                      // Path to the chunk's directory
     pub(crate) segments: Vec<GenomicRange>, // Genomic segments contained in this chunk
     trim_target: Option<usize>,             // Output trimming
-    split_data: Option<(usize, usize)>,     // Optional size for splitting data
+    split_data: Option<(usize, usize)>,     // Optional size for splitting data, 1st is for sequences, 2nd for values
     data_store: DataStore,                  // Data store
     subset: Option<Vec<usize>>,             // Optional indices representing a subset of the data
 }
@@ -220,12 +236,19 @@ impl DataChunk {
         })
     }
 
+    /// Set the output trimming target for the data store.
     pub fn set_trim_target(&mut self, trim_target: usize) {
         self.trim_target = Some(trim_target);
     }
 
+    /// Set the split data size for the data store.
     pub fn set_split_data(&mut self, split_data: (usize, usize)) {
         self.split_data = Some(split_data);
+    }
+
+    /// Set the aggregation size for the data store.
+    pub fn set_aggregation(&mut self, aggregation: usize) {
+        self.data_store.aggregation = Some(aggregation);
     }
 
     /// indices must be unique and sorted
@@ -374,6 +397,7 @@ struct DataStore {
     index: DataStoreIndex,
     file: std::fs::File,
     location: PathBuf,
+    aggregation: Option<usize>,
 }
 
 impl DataStore {
@@ -411,6 +435,7 @@ impl DataStore {
             index: DataStoreIndex(index),
             file,
             location: location.as_ref().to_path_buf(),
+            aggregation: None,
         };
         store.write_index()?;
         Ok(store)
@@ -452,6 +477,7 @@ impl DataStore {
             index,
             file,
             location: location.as_ref().to_path_buf(),
+            aggregation: None,
         })
     }
 
@@ -465,7 +491,11 @@ impl DataStore {
                     .unwrap();
                 let mut buffer = vec![0; size];
                 self.file.read_exact(&mut buffer).unwrap();
-                Values::decode(&buffer).unwrap().0
+                let mut data = Values::decode(&buffer).unwrap();
+                if let Some(aggregation) = self.aggregation {
+                    data = data.aggregate_by_length(aggregation);
+                }
+                data.0
             })
             .collect::<Vec<_>>();
         let result = result.iter().map(|x| x.view()).collect::<Vec<_>>();
@@ -504,9 +534,16 @@ impl DataStore {
             .map(|x| x.collect())
             .collect();
 
+        let agg = self.aggregation.clone();
         chunks.into_par_iter().map(move |c| {
             c.into_iter()
-                .map(|&(i, n)| decode_maybe(&buf[i..i + n]))
+                .map(|&(i, n)| {
+                    let mut data = decode_maybe(&buf[i..i + n]);
+                    if let Some(aggregation) = agg {
+                        data = data.aggregate_by_length(aggregation);
+                    }
+                    data
+                })
                 .collect::<Vec<_>>()
         })
     }
@@ -569,4 +606,27 @@ fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     let mut decompressed_data = Vec::new();
     decoder.read_to_end(&mut decompressed_data).unwrap();
     decompressed_data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn test_arr_aggregation() {
+        let arr = array![
+            [[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]],
+            [[7.0], [8.0], [9.0], [10.0], [11.0], [12.0]]
+        ];
+        assert_eq!(arr.dim(), (2, 6, 1));
+        
+        let values = Values(arr.mapv(bf16::from_f64));
+        let aggregated = values.aggregate_by_length(2).0.mapv(|x| x.to_f64());
+        assert_eq!(aggregated.dim(), (2, 3, 1));
+        assert_eq!(aggregated, array![
+            [[1.5], [3.5], [5.5]],
+            [[7.5], [9.5], [11.5]]
+        ]);
+    }
 }

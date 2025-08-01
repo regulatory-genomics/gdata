@@ -21,7 +21,7 @@ use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
 use crate::dataloader::chunk::{DataChunk, Values};
-use crate::dataloader::index::{make_seq_index, ChunkIndex};
+use crate::dataloader::index::{make_seq_index, ChunkIndex, ReadChunkOptions};
 use crate::w5z::W5Z;
 
 /** Represents a builder for genomic data, allowing for the creation and management of genomic datasets.
@@ -377,7 +377,7 @@ impl GenomeDataBuilder {
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
                 self.seq_index
-                    .iter_chunks::<ThreadRng>(None, None, true, None)
+                    .iter_chunks::<ThreadRng>(ReadChunkOptions { write: true, ..Default::default()}, None)
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {

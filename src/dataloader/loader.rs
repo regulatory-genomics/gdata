@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::dataloader::builder::GenomeDataBuilder;
 use crate::dataloader::chunk::Sequences;
+use crate::dataloader::index::ReadChunkOptions;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -33,6 +34,10 @@ use crate::dataloader::chunk::Sequences;
         The path to the genomic data directory.
     batch_size : int
         The number of genomic sequences to retrieve in each batch (default is 8).
+    resolution : Optional[int]
+        The resolution of the genomic data. If not provided, it defaults to the dataset's resolution.
+        If the resolution is provided, it must be a multiple of the dataset's resolution.
+        The values will be aggregated (by taking the average) to this resolution.
     trim_target: Optional[int]
         Trim both ends of the target vector according to the `trim_target` parameter.
         As a result, the length of the values will be reduced by `2 * trim_target`.
@@ -88,6 +93,7 @@ use crate::dataloader::chunk::Sequences;
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
+    resolution: Option<u64>,
     window_size: Option<u64>,
     batch_size: usize,
     trim_target: Option<usize>,
@@ -163,15 +169,23 @@ impl GenomeDataLoader {
         new_loader
     }
 
-    pub fn iter(&mut self) -> DataLoaderIter {
-        let shuffle = if self.shuffle {
-            Some(&mut self.rng)
+    fn get_read_chunk_opts(&self) -> ReadChunkOptions {
+        let resolution = self.resolution();
+
+        let aggregation = if resolution != self.builder.resolution {
+            if resolution % self.builder.resolution != 0 {
+                panic!(
+                    "Loader's resolution ({}) must be a multiple of the dataset's resolution ({})",
+                    resolution, self.builder.resolution
+                );
+            }
+            Some((resolution / self.builder.resolution) as usize)
         } else {
             None
         };
+
         let split_data = if let Some(s) = self.window_size {
             let builder_window_size = self.builder.window_size;
-            let resolution = self.builder.resolution;
             assert!(
                 s < builder_window_size,
                 "Loader's window size must be less than the dataset's window size ({})",
@@ -191,15 +205,30 @@ impl GenomeDataLoader {
         } else {
             None
         };
-        let chunks = self.builder.seq_index.iter_chunk_data(
+        let opts = ReadChunkOptions {
             split_data,
-            self.trim_target
-                .map(|t| t / self.builder.resolution as usize),
-            self.scale,
-            self.clamp_max,
-            shuffle,
-            self.prefetch,
-        );
+            trim_target: self
+                .trim_target
+                .map(|t| t / resolution as usize),
+            aggregation,
+            scale: self.scale,
+            clamp_max: self.clamp_max,
+            write: false,
+        };
+        opts
+    }
+
+    pub fn iter(&mut self) -> DataLoaderIter {
+        let opts = self.get_read_chunk_opts();
+        let shuffle = if self.shuffle {
+            Some(&mut self.rng)
+        } else {
+            None
+        };
+        let chunks = self
+            .builder
+            .seq_index
+            .iter_chunk_data(opts, shuffle, self.prefetch);
 
         DataLoaderIter {
             iter: PrefethIterator::new(
@@ -221,18 +250,19 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (location, *,
-            batch_size=8, trim_target=None, scale=None, clamp_max=None,
+            batch_size=8, resolution=None, trim_target=None, scale=None, clamp_max=None,
             window_size=None, shuffle=false, seq_as_string=false, prefetch=4,
             random_seed=2025,
         ),
         text_signature = "($self, location, *,
-            batch_size=8, trim_target=None, scale=None, clamp_max=None,
+            batch_size=8, resolution=None, trim_target=None, scale=None, clamp_max=None,
             window_size=None, shuffle=False, seq_as_string=False, prefetch=4,
             random_seed=2025)"
     )]
     pub fn new(
         location: PathBuf,
         batch_size: usize,
+        resolution: Option<u64>,
         trim_target: Option<usize>,
         scale: Option<f32>,
         clamp_max: Option<f32>,
@@ -260,6 +290,7 @@ impl GenomeDataLoader {
             builder,
             window_size,
             batch_size,
+            resolution,
             trim_target: None,
             scale,
             clamp_max,
@@ -314,7 +345,7 @@ impl GenomeDataLoader {
 
     #[getter]
     fn resolution(&self) -> u64 {
-        self.builder.resolution
+        self.resolution.unwrap_or(self.builder.resolution)
     }
 
     #[getter]
@@ -807,7 +838,7 @@ impl SeqIndexer {
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        Ok(chunk.open(false)?.get_seq_at(*i)?)
+        Ok(chunk.open(&Default::default())?.get_seq_at(*i)?)
     }
 }
 
@@ -838,7 +869,7 @@ impl DataIndexer {
             .seq_index
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let vals = chunk.open(false)?.read_keys(j)?;
+        let vals = chunk.open(&Default::default())?.read_keys(j)?;
         Ok(vals
             .0
             .axis_iter(ndarray::Axis(0))
@@ -1175,6 +1206,7 @@ impl MultiDataLoaderIter {
 /** This class combines multiple `GenomeDataLoaderMap` instances into a single loader.
 
     It allows for the simultaneous loading of genomic data from multiple species.
+    The resulting loader will iterate over all datasets in an alternating fashion.
 
     Parameters
     ----------

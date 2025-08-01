@@ -12,6 +12,29 @@ use std::{
 
 use crate::dataloader::chunk::{DataChunk, Sequences};
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReadChunkOptions {
+    pub write: bool,
+    pub split_data: Option<(usize, usize)>, // Optional size for splitting data, 1st is for sequences, 2nd for values
+    pub trim_target: Option<usize>,         // Optional output trimming target
+    pub aggregation: Option<usize>,         // Optional aggregation size
+    pub scale: Option<f32>,
+    pub clamp_max: Option<f32>, 
+}
+
+impl Default for ReadChunkOptions {
+    fn default() -> Self {
+        Self {
+            write: false,
+            split_data: None,
+            trim_target: None,
+            aggregation: None,
+            scale: None,
+            clamp_max: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ChunkInfo {
     chrom: String,
@@ -20,8 +43,18 @@ pub(crate) struct ChunkInfo {
 }
 
 impl ChunkInfo {
-    pub fn open(&self, write: bool) -> Result<DataChunk> {
-        DataChunk::open(&self.path, write)
+    pub fn open(&self, opts: &ReadChunkOptions) -> Result<DataChunk> {
+        let mut chunk = DataChunk::open(&self.path, opts.write)?;
+        if let Some(trim_target) = opts.trim_target {
+            chunk.set_trim_target(trim_target);
+        }
+        if let Some(split_data) = opts.split_data {
+            chunk.set_split_data(split_data);
+        }
+        if let Some(aggregation) = opts.aggregation {
+            chunk.set_aggregation(aggregation);
+        }
+        Ok(chunk)   
     }
 }
 
@@ -35,7 +68,7 @@ impl ChunkIndex {
 
     pub fn get_chunk_size(&self) -> usize {
         let chunk_info = &self.0.values().next().unwrap().0;
-        chunk_info.open(false).unwrap().len()
+        chunk_info.open(&Default::default()).unwrap().len()
     }
 
     /// Returns all chromosomes in the index.
@@ -81,9 +114,7 @@ impl ChunkIndex {
 
     pub fn iter_chunks<R: Rng>(
         &self,
-        split_data: Option<(usize, usize)>,
-        trim_target: Option<usize>,
-        write: bool,
+        opts: ReadChunkOptions,
         shuffle: Option<&mut R>,
     ) -> impl Iterator<Item = DataChunk> {
         let mut chunks: Vec<_> = self
@@ -101,24 +132,15 @@ impl ChunkIndex {
             chunks.shuffle(rng);
         }
         chunks.into_iter().map(move |(chunk, idx)| {
-            let mut chunk = chunk.open(write).unwrap();
-            chunk.subset(idx).unwrap();
-            if let Some(trim_target) = trim_target {
-                chunk.set_trim_target(trim_target);
-            }
-            if let Some(split_data) = split_data {
-                chunk.set_split_data(split_data);
-            }
-            chunk
+            let mut c = chunk.open(&opts).unwrap();
+            c.subset(idx).unwrap();
+            c
         })
     }
 
     pub fn iter_chunk_data<R: Rng>(
         &self,
-        split_data: Option<(usize, usize)>,
-        trim_target: Option<usize>,
-        scale: Option<f32>,
-        clamp_max: Option<f32>, 
+        opts: ReadChunkOptions,
         shuffle: Option<&mut R>,
         prefetch: usize,
     ) -> impl Iterator<Item = (Sequences, Array3<f32>)> {
@@ -137,24 +159,19 @@ impl ChunkIndex {
             chunks.shuffle(rng);
         }
         let chunks: Vec<_> = chunks.into_iter().chunks(prefetch).into_iter().map(|x| x.collect::<Vec<_>>()).collect();
-        let scale = scale.map(bf16::from_f32);
-        let clamp_max = clamp_max.map(bf16::from_f32);
-        chunks.into_iter().flat_map(move |group| group.into_par_iter().map(move |(chunk, idx)| {
-            let mut chunk = chunk.open(true).unwrap();
-            chunk.subset(idx.clone()).unwrap();
-            if let Some(trim_target) = trim_target {
-                chunk.set_trim_target(trim_target);
-            }
-            if let Some(split_data) = split_data {
-                chunk.set_split_data(split_data);
-            }
-
-            let seqs = chunk.get_seqs().unwrap();
-            let mut values = chunk.read_all();
-            values.transform(scale, clamp_max);
-            (seqs, values.0.mapv(|x| x.to_f32()))
-        }).collect::<Vec<_>>()
-        )
+        let scale = opts.scale.map(bf16::from_f32);
+        let clamp_max = opts.clamp_max.map(bf16::from_f32);
+        chunks.into_iter().flat_map(move |group| {
+            let opts = opts.clone();
+            group.into_par_iter().map(move |(chunk, idx)| {
+                let mut chunk= chunk.open(&opts).unwrap();
+                chunk.subset(idx).unwrap();
+                let seqs = chunk.get_seqs().unwrap();
+                let mut values = chunk.read_all();
+                values.transform(scale, clamp_max);
+                (seqs, values.0.mapv(|x| x.to_f32()))
+            }).collect::<Vec<_>>()
+        })
     }
 }
 

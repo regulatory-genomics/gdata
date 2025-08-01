@@ -132,6 +132,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 1,
@@ -185,6 +186,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 1,
@@ -205,6 +207,7 @@ mod tests {
             let mut loader = GenomeDataLoader::new(
                 builder.clone(),
                 1,
+                None,
                 None,
                 Some(2.0),
                 Some(4.0),
@@ -228,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn test_genome_data_loader3() {
+    fn test_window_size() {
         let temp_dir = tempfile::tempdir().unwrap();
         let (builder, fasta) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
         let w5z = W5Z::open(temp_dir.path().join("data2.w5z")).unwrap();
@@ -242,6 +245,7 @@ mod tests {
         let mut loader = GenomeDataLoader::new(
             builder.clone(),
             7,
+                None,
             None,
             None,
             None,
@@ -263,6 +267,7 @@ mod tests {
             builder.clone(),
             7,
             None,
+                None,
             None,
             None,
             Some(16),
@@ -299,6 +304,7 @@ mod tests {
         let mut loader1 = GenomeDataLoader::new(
             builder.clone(),
             7,
+                None,
             Some(4),
             None,
             None,
@@ -317,6 +323,7 @@ mod tests {
         let mut loader2 = GenomeDataLoader::new(
             builder.clone(),
             7,
+                None,
             None,
             None,
             None,
@@ -346,6 +353,7 @@ mod tests {
         let mut loader1 = GenomeDataLoader::new(
             builder.clone(),
             7,
+                None,
             Some(4),
             None,
             None,
@@ -369,6 +377,7 @@ mod tests {
             builder.clone(),
             7,
             None,
+                None,
             None,
             None,
             Some(16),
@@ -388,5 +397,63 @@ mod tests {
         assert_eq!(values1.len(), values2.len());
         assert_eq!(values1, values2);
         assert_eq!(seqs[0..fasta.len()], fasta);
+    }
+
+    #[test]
+    fn test_aggregate() {
+        let mut values1 = Vec::new();
+        {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 32, 4);
+            let mut loader1 = GenomeDataLoader::new(
+                builder,
+                7,
+                    None,
+                Some(4),
+                None,
+                None,
+                Some(16),
+                false,
+                false,
+                1,
+                0,
+            )
+            .unwrap();
+            loader1
+                .iter()
+                .for_each(|(_, v)| {
+                    values1.extend(v.slice(s![..,..,0]).to_owned().into_iter());
+                });
+        }
+
+        let mut values2 = Vec::new();
+        {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let (builder, _) = build_genome(temp_dir.path().to_path_buf(), 32, 1);
+            let mut loader1 = GenomeDataLoader::new(
+                builder,
+                7,
+                    Some(4),
+                Some(4),
+                None,
+                None,
+                Some(16),
+                false,
+                false,
+                1,
+                0,
+            )
+            .unwrap();
+            loader1
+                .iter()
+                .for_each(|(_, v)| {
+                    values2.extend(v.slice(s![..,..,0]).to_owned().into_iter());
+                });
+        }
+        assert_eq!(values1.len(), values2.len());
+        for (v1, v2) in values1.iter().zip(values2.iter())
+        {
+            assert_eq!(v1, v2, "Values differ: {} != {}", v1, v2);
+        }
     }
 }
