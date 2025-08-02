@@ -105,10 +105,10 @@ mod tests {
         let builder = GenomeDataBuilder::new(
             path.join("builder"),
             path.join("genome.fa"),
-            None,
             window_size,
             None,
-            4,
+            None,
+            Some(4),
             resolution,
             None,
             true,

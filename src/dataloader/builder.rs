@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::chunk::{DataChunk, Values};
+use crate::dataloader::chunk::{self, DataChunk, Values};
 use crate::dataloader::index::{make_seq_index, ChunkIndex, ReadChunkOptions};
 use crate::w5z::W5Z;
 
@@ -54,16 +54,17 @@ use crate::w5z::W5Z;
         The directory where the genomic data will be stored.
     genome_fasta
         The path to the FASTA file containing the genome sequences.
+    window_size
+        The size of the genomic windows to be processed.
     segments
         Optional list of genomic segments to include in the dataset.
         The genomic segments should be provided as strings in the format "chrom:start-end".
         If None, the entire genome will be used.
-    window_size
-        The size of the genomic windows to be processed (default is 524288).
     step_size
         The step size for sliding the window across the genome (default is None, which uses `window_size`).
     chunk_size
-        The number of segments to store in each chunk (default is 128).
+        The number of segments to store in each chunk. If None, it will be calculated based on
+        the formula `2^(25 - log2(window_size))`.
     resolution
         The resolution of the stored genomic data (default is 1).
     chroms
@@ -136,17 +137,17 @@ impl GenomeDataBuilder {
     #[new]
     #[pyo3(
         signature = (
-            location, genome_fasta, *, segments=None, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None, overwrite=false,
+            location, genome_fasta, window_size, *, segments=None, step_size=None, chunk_size=None, resolution=1, chroms=None, overwrite=false,
         ),
-        text_signature = "($self, location, genome_fasta, *, segments=None, window_size=524288, step_size=None, chunk_size=128, resolution=1, chroms=None, overwrite=False)"
+        text_signature = "($self, location, genome_fasta, window_size, *, segments=None, step_size=None, chunk_size=None, resolution=1, chroms=None, overwrite=False)"
     )]
     pub fn new(
         location: PathBuf,
         genome_fasta: PathBuf,
-        segments: Option<Vec<String>>,
         window_size: u64,
+        segments: Option<Vec<String>>,
         step_size: Option<u64>,
-        chunk_size: usize,
+        chunk_size: Option<usize>,
         resolution: u64,
         chroms: Option<Vec<String>>,
         overwrite: bool,
@@ -196,6 +197,13 @@ impl GenomeDataBuilder {
         if window_size % resolution != 0 {
             bail!("Window size must be a multiple of resolution");
         }
+        let chunk_size = chunk_size.unwrap_or_else(|| {
+            let n = 25.0 - (window_size as f64).log2();
+            if n < 0.0 {
+                panic!("Window size is too large for chunk size calculation");
+            }
+            2_usize.pow(n.trunc() as u32)
+        });
 
         if location.exists() {
             if overwrite {
