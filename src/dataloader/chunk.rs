@@ -306,6 +306,25 @@ impl DataChunk {
         Ok(seq)
     }
 
+    pub fn read(&mut self, idx: &[usize]) -> Result<Values> {
+        let mut data = self.data_store.read(idx);
+        if let Some(idx) = self.subset.as_ref() {
+            data = data.select_rows(idx);
+        }
+        if let Some(split_data) = self.split_data {
+            data = data.split(split_data.1)?;
+        }
+        let mut arr = data.0;
+        if let Some(trim_target) = self.trim_target {
+            arr = arr
+                .slice(s![.., trim_target..arr.dim().1 - trim_target, ..])
+                .to_owned()
+        } else {
+            arr = arr.as_standard_layout().to_owned()
+        };
+        Ok(Values(arr))
+    }
+
     pub fn read_keys(&mut self, keys: &[String]) -> Result<Values> {
         let mut data = self.data_store.read_keys(keys);
         if let Some(idx) = self.subset.as_ref() {
@@ -389,6 +408,10 @@ impl DataStoreIndex {
     fn get(&self, key: &str) -> Option<(usize, usize)> {
         let (i, n) = self.0.get(key)?;
         Some((*i, *n))
+    }
+
+    fn get_index(&self, idx: usize) -> Option<(usize, usize)> {
+        self.0.get_index(idx).map(|(_, &(i, n))| (i, n))
     }
 }
 
@@ -479,6 +502,27 @@ impl DataStore {
             location: location.as_ref().to_path_buf(),
             aggregation: None,
         })
+    }
+
+    fn read(&mut self, idx: &[usize]) -> Values {
+        let result = idx
+            .iter()
+            .map(|i| {
+                let (offset, size) = self.index.get_index(*i).unwrap();
+                self.file
+                    .seek(std::io::SeekFrom::Start(offset as u64))
+                    .unwrap();
+                let mut buffer = vec![0; size];
+                self.file.read_exact(&mut buffer).unwrap();
+                let mut data = Values::decode(&buffer).unwrap();
+                if let Some(aggregation) = self.aggregation {
+                    data = data.aggregate_by_length(aggregation);
+                }
+                data.0
+            })
+            .collect::<Vec<_>>();
+        let result = result.iter().map(|x| x.view()).collect::<Vec<_>>();
+        Values(ndarray::concatenate(Axis(2), &result).unwrap())
     }
 
     fn read_keys(&mut self, keys: &[String]) -> Values {

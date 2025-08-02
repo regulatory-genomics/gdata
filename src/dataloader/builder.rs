@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::chunk::{self, DataChunk, Values};
+use crate::dataloader::chunk::{DataChunk, Values};
 use crate::dataloader::index::{make_seq_index, ChunkIndex, ReadChunkOptions};
 use crate::w5z::W5Z;
 

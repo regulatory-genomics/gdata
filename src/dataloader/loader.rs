@@ -1,9 +1,8 @@
 use anyhow::{ensure, Context, Result};
 use bed_utils::bed::GenomicRange;
-use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array, Array1, Array2, Array3, ArrayD, Dimension, Ix2};
+use ndarray::{Array, Array1, Array3, ArrayD, Dimension, Ix2};
 use numpy::{PyArray1, PyArray2, PyArrayDyn};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
@@ -864,26 +863,6 @@ impl SeqIndexer {
 #[pyclass]
 pub struct DataIndexer(Py<GenomeDataLoader>);
 
-impl DataIndexer {
-    fn get(&self, py: Python<'_>, key: &str, j: &[String]) -> Result<Array2<bf16>> {
-        let py_ref = self.0.borrow(py);
-        let (chunk, i) = py_ref
-            .builder
-            .seq_index
-            .get(&GenomicRange::from_str(key).unwrap())
-            .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let mut opts = py_ref.get_read_chunk_opts();
-        opts.split_data = None;  // Do not split data
-        let vals = chunk.open(&opts)?.read_keys(j)?;
-        Ok(vals
-            .0
-            .axis_iter(ndarray::Axis(0))
-            .nth(*i)
-            .unwrap()
-            .to_owned())
-    }
-}
-
 #[pymethods]
 impl DataIndexer {
     fn __getitem__<'a>(
@@ -891,14 +870,45 @@ impl DataIndexer {
         py: Python<'a>,
         key: Bound<'a, PyAny>,
     ) -> Result<Bound<'a, PyArray2<f32>>> {
-        let (i, j): (String, Bound<'_, PyAny>) = key.extract()?;
-        let j = if let Ok(j_) = j.extract::<String>() {
-            vec![j_]
+        let loader = self.0.borrow(py);
+        let (seq_index, mut data_index): (Bound<'_, PyAny>, Bound<'_, PyAny>) = key.extract()?;
+        if !data_index.is_instance_of::<pyo3::types::PyList>() {
+            data_index = vec![data_index].into_pyobject(py)?.into_any();
+        }
+
+        let (chunk, i) = if let Ok(chunk_idx) = seq_index.extract::<String>() {
+            loader
+                .builder
+                .seq_index
+                .get(&GenomicRange::from_str(&chunk_idx).unwrap())
+                .with_context(|| format!("Failed to get data chunk for key: {}", key))?
         } else {
-            j.extract::<Vec<String>>()?
+            let chunk_idx: usize = seq_index.extract()?;
+            loader
+                .builder
+                .seq_index
+                .0
+                .values()
+                .nth(chunk_idx)
+                .with_context(|| format!("Invalid chunk index: {}", chunk_idx))?
         };
 
-        let data = self.get(py, &i, &j)?.mapv(|x| x.to_f32());
+        let mut opts = loader.get_read_chunk_opts();
+        opts.split_data = None;  // Do not split data
+        let mut chunk = chunk.open(&opts)?;
+
+        let arr = if let Ok(j_) = data_index.extract::<Vec<String>>() {
+            chunk.read_keys(&j_)?
+        } else {
+            chunk.read(&data_index.extract::<Vec<usize>>()?)?
+        };
+
+        let data = arr
+            .0
+            .axis_iter(ndarray::Axis(0))
+            .nth(*i)
+            .unwrap()
+            .mapv(|x| x.to_f32());
         Ok(PyArray2::from_owned_array(py, data))
     }
 }

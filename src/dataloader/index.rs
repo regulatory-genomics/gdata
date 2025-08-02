@@ -59,7 +59,7 @@ impl ChunkInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct ChunkIndex(BTreeMap<GenomicRange, (ChunkInfo, usize)>);
+pub struct ChunkIndex(pub(crate) BTreeMap<GenomicRange, (ChunkInfo, usize)>);
 
 impl ChunkIndex {
     pub fn len(&self) -> usize {
