@@ -5,8 +5,8 @@ use bincode::{Decode, Encode};
 use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{s, Array1, Array2, Array3, ArrayD, Axis};
-use numpy::{Ix2, PyArray2};
+use ndarray::{s, Array1, Array2, Array3, Axis};
+use numpy::PyArray2;
 use pyo3::prelude::*;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::io::{Read, Seek, Write};
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Decode, Encode)]
+#[derive(Debug, Clone, Decode, Encode, PartialEq)]
 pub struct Values(#[bincode(with_serde)] pub Array3<bf16>);
 
 impl Values {
@@ -88,7 +88,9 @@ impl Values {
             );
         }
         let num_chunks = h / size;
-        let data = self.0.into_shape_with_order((d, num_chunks, size, w))
+        let data = self
+            .0
+            .into_shape_with_order((d, num_chunks, size, w))
             .unwrap()
             .mapv(|x| x.to_f64())
             .mean_axis(Axis(2))
@@ -103,12 +105,7 @@ impl Values {
     }
 
     fn encode(self) -> Result<Vec<u8>> {
-        // Permute the axes to offer better compression ratio, as the second axis
-        // is least variable, followed by the first, and the third is most variable.
-        let data = bincode::encode_to_vec::<_, Configuration>(
-            self,
-            Configuration::default(),
-        )?;
+        let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
         let data = compress_data_zst(data);
         Ok(data)
     }
@@ -190,9 +187,9 @@ pub struct DataChunk {
     location: PathBuf,                      // Path to the chunk's directory
     pub(crate) segments: Vec<GenomicRange>, // Genomic segments contained in this chunk
     trim_target: Option<usize>,             // Output trimming
-    split_data: Option<(usize, usize)>,     // Optional size for splitting data, 1st is for sequences, 2nd for values
-    data_store: DataStore,                  // Data store
-    subset: Option<Vec<usize>>,             // Optional indices representing a subset of the data
+    split_data: Option<(usize, usize)>, // Optional size for splitting data, 1st is for sequences, 2nd for values
+    data_store: DataStore,              // Data store
+    subset: Option<Vec<usize>>,         // Optional indices representing a subset of the data
 }
 
 impl DataChunk {
@@ -205,10 +202,7 @@ impl DataChunk {
             segments,
             trim_target: None,
             split_data: None,
-            data_store: DataStore::create(
-                location.as_ref().join("data"),
-                std::iter::empty::<(_, String)>(),
-            )?,
+            data_store: DataStore::create(location.as_ref().join("data"))?,
             subset: None,
         })
     }
@@ -419,19 +413,15 @@ impl DataStoreIndex {
 struct DataStore {
     index: DataStoreIndex,
     file: std::fs::File,
-    location: PathBuf,
     aggregation: Option<usize>,
 }
 
 impl DataStore {
-    fn create(
-        location: impl AsRef<Path>,
-        data: impl IntoIterator<Item = (String, impl AsRef<Path>)>,
-    ) -> Result<Self> {
-        let mut file = std::fs::OpenOptions::new()
+    fn create(location: impl AsRef<Path>) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .read(true)
-            .append(true)
+            .append(false)
             .create(true)
             .open(&location)
             .with_context(|| {
@@ -440,68 +430,58 @@ impl DataStore {
                     location.as_ref().display()
                 )
             })?;
+        let index = DataStoreIndex(IndexMap::new());
 
-        let mut index = IndexMap::new();
-        let mut buffer = Vec::new();
-        let mut acc = 0;
-
-        for (key, fl) in data {
-            buffer.clear();
-            let n = std::fs::File::open(fl)?.read_to_end(&mut buffer)?;
-            file.write_all(buffer.as_slice())?;
-            index.insert(key.to_string(), (acc, n));
-            acc += n;
-        }
-
-        file.flush()?;
-        let store = Self {
-            index: DataStoreIndex(index),
+        let mut store = Self {
+            index,
             file,
-            location: location.as_ref().to_path_buf(),
             aggregation: None,
         };
         store.write_index()?;
         Ok(store)
     }
 
-    fn write_index(&self) -> Result<()> {
-        let index_file = self.location.with_extension("index");
+    fn write_index(&mut self) -> Result<()> {
+        let pos = self.file.seek(std::io::SeekFrom::End(0))?;
         let index_data = bincode::encode_to_vec(&self.index, bincode::config::standard())?;
-        std::fs::write(index_file, index_data)?;
+        let n_bytes = index_data.len();
+        self.file.write_all(&index_data)?;
+        self.file.write_all(&pos.to_le_bytes())?;
+        self.file.write_all(&(n_bytes as u32).to_le_bytes())?;
         Ok(())
     }
 
     fn open(location: impl AsRef<Path>, writable: bool) -> Result<Self> {
         let mut opt = std::fs::OpenOptions::new();
-        let opt = opt.create(false).read(true);
+        let opt = opt.create(false).read(true).append(false);
         let opt = if writable {
-            opt.write(true).append(true)
+            opt.write(true)
         } else {
             opt.write(false)
         };
-        let file = opt.open(&location).with_context(|| {
+        let mut file = opt.open(&location).with_context(|| {
             format!(
                 "Failed to open data file at {}",
                 location.as_ref().display()
             )
         })?;
 
-        let index_file = location.as_ref().with_extension("index");
-        let index = if index_file.exists() {
-            let index_data = std::fs::read(index_file)?;
-            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0
-        } else {
-            bail!(
-                "Data store index file not found at {}",
-                index_file.display()
-            )
-        };
+        let index = read_index_from_file(&mut file)?;
         Ok(Self {
             index,
             file,
-            location: location.as_ref().to_path_buf(),
             aggregation: None,
         })
+    }
+
+    /// Find the position in the file where the next chunk should be inserted.
+    fn seek_insert_loc(&mut self) -> Result<u64> {
+        self.file.seek(std::io::SeekFrom::End(-12))?;
+        let mut start = [0; 8];
+        self.file.read_exact(&mut start)?;
+        let start = u64::from_le_bytes(start);
+
+        Ok(self.file.seek(std::io::SeekFrom::Start(start))?)
     }
 
     fn read(&mut self, idx: &[usize]) -> Values {
@@ -547,25 +527,6 @@ impl DataStore {
     }
 
     fn iter_chunks(&mut self) -> impl ParallelIterator<Item = Vec<Values>> + '_ {
-        fn decode_maybe(raw: &[u8]) -> Values {
-            if let Ok(v) = Values::decode(raw) {
-                v
-            } else {
-                let data = decompress_data_zst(raw);
-                let data: ArrayD<bf16> = bincode::serde::decode_from_slice::<_, Configuration>(
-                    &data,
-                    Configuration::default(),
-                )
-                .unwrap()
-                .0;
-                Values(
-                    data.into_dimensionality::<Ix2>()
-                        .unwrap()
-                        .insert_axis(Axis(2)),
-                )
-            }
-        }
-
         self.file.rewind().unwrap();
         let mut buf = Vec::new();
         self.file.read_to_end(&mut buf).unwrap();
@@ -582,7 +543,7 @@ impl DataStore {
         chunks.into_par_iter().map(move |c| {
             c.into_iter()
                 .map(|&(i, n)| {
-                    let mut data = decode_maybe(&buf[i..i + n]);
+                    let mut data = Values::decode(&buf[i..i + n]).unwrap();
                     if let Some(aggregation) = agg {
                         data = data.aggregate_by_length(aggregation);
                     }
@@ -596,20 +557,21 @@ impl DataStore {
         &mut self,
         data: impl IntoParallelIterator<Item = (String, Values)>,
     ) -> Result<()> {
-        let index = &mut self.index.0;
-        let mut offset = self.file.seek(std::io::SeekFrom::End(0))? as usize;
         let data: Vec<_> = data
             .into_par_iter()
             .map(|(key, values)| (key, values.encode().unwrap()))
             .collect();
+        let mut offset = self.seek_insert_loc()? as usize;
         data.into_iter().for_each(|(key, buffer)| {
             let size = buffer.len();
             self.file.write_all(&buffer).unwrap();
-            index.insert(key, (offset, size));
+            self.index.0.insert(key, (offset, size));
             offset += size;
         });
-        self.file.flush()?;
+
+        self.file.set_len(offset as u64).unwrap();
         self.write_index()?;
+        self.file.flush()?;
         Ok(())
     }
 }
@@ -652,6 +614,24 @@ fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     decompressed_data
 }
 
+fn read_index_from_file(file: &mut std::fs::File) -> Result<DataStoreIndex> {
+    file.seek(std::io::SeekFrom::End(-12))?;
+    let mut start = [0; 8];
+    file.read_exact(&mut start)?;
+    let start = u64::from_le_bytes(start);
+
+    let mut len = [0; 4];
+    file.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len);
+
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut index_data = vec![0; len as usize];
+    file.read_exact(&mut index_data)?;
+    let index: DataStoreIndex =
+        bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
+    Ok(index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,13 +644,47 @@ mod tests {
             [[7.0], [8.0], [9.0], [10.0], [11.0], [12.0]]
         ];
         assert_eq!(arr.dim(), (2, 6, 1));
-        
+
         let values = Values(arr.mapv(bf16::from_f64));
         let aggregated = values.aggregate_by_length(2).0.mapv(|x| x.to_f64());
         assert_eq!(aggregated.dim(), (2, 3, 1));
-        assert_eq!(aggregated, array![
-            [[1.5], [3.5], [5.5]],
-            [[7.5], [9.5], [11.5]]
-        ]);
+        assert_eq!(
+            aggregated,
+            array![[[1.5], [3.5], [5.5]], [[7.5], [9.5], [11.5]]]
+        );
+    }
+
+    #[test]
+    fn test_datastore() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let location = temp_dir.path().join("datastore");
+        let mut store = DataStore::create(&location).unwrap();
+
+        let values1 =
+            Values(array![[[1.0], [2.0], [3.0]], [[4.0], [5.0], [6.0]]].mapv(bf16::from_f64));
+        let values2 =
+            Values(array![[[7.0], [8.0], [9.0]], [[10.0], [11.0], [12.0]]].mapv(bf16::from_f64));
+
+        store
+            .write_par(vec![
+                ("key1".to_string(), values1),
+                ("key2".to_string(), values2),
+            ])
+            .unwrap();
+
+        let read_values = store
+            .read_keys(&["key1".to_string(), "key2".to_string()])
+            .0
+            .as_standard_layout()
+            .to_owned();
+        assert_eq!(read_values.dim(), (2, 3, 2));
+        assert_eq!(
+            read_values,
+            array![
+                [[1.0, 7.0], [2.0, 8.0], [3.0, 9.0]],
+                [[4.0, 10.0], [5.0, 11.0], [6.0, 12.0]]
+            ]
+            .mapv(bf16::from_f64)
+        );
     }
 }
