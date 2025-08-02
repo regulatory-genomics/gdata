@@ -1,0 +1,6 @@
+gdata.utils.W5Z.verify
+======================
+
+.. currentmodule:: gdata.utils
+
+.. automethod:: W5Z.verify
