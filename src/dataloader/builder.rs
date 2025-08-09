@@ -188,7 +188,7 @@ impl GenomeDataBuilder {
                         })
                         .unzip();
                     let data = DataChunk::new(location.join(&chr).join(i.to_string()), names)?;
-                    data.save_seqs(seq)?;
+                    data.save_seqs(seq, 9)?;
                 }
             }
             Ok(())
@@ -456,6 +456,24 @@ impl GenomeDataBuilder {
     )]
     pub fn add_file(&self, key: &str, w5z: PathBuf) -> Result<()> {
         self.add_files(IndexMap::from([(key.to_string(), w5z)]))
+    }
+
+    /** Compresses the genomic data in the dataset.
+
+       This method compresses the genomic data stored in the dataset using a specified compression level.
+
+       Parameters
+       ----------
+       compression_lvl : int
+           The level of compression to apply (0-19).
+    */
+    fn compress(&self, compression_lvl: u8) -> Result<()> {
+        self.seq_index
+            .iter_chunks::<ThreadRng>(ReadChunkOptions { write: true, ..Default::default()}, None)
+            .for_each(|mut chunk| {
+                chunk.compress(compression_lvl).unwrap();
+            });
+        Ok(())
     }
 }
 

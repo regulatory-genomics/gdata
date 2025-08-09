@@ -13,6 +13,7 @@ Core Classes
 .. autosummary::
     :toctree: _autosummary
 
+    W5Z
     GenomeDataLoader
     GenomeDataLoaderMap
     CatGenomeDataLoader
@@ -25,3 +26,5 @@ Utilities
     :toctree: _autosummary
 
     utils.W5Z
+    utils.bw_to_w5z
+    utils.bam_cov

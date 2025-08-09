@@ -1,14 +1,34 @@
-mod bam;
-mod bigwig;
 mod w5z;
 mod dataloader;
+mod utils;
 
 use pyo3::prelude::*;
+use std::io::Write;
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    pyo3_log::init();
+fn gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    env_logger::builder()
+        .format(|buf, record| {
+            let timestamp = buf.timestamp();
+            let style = buf.default_level_style(record.level());
+            writeln!(
+                buf,
+                "[{timestamp} {style}{}{style:#}] {}",
+                record.level(),
+                record.args()
+            )
+        })
+        .filter_level(log::LevelFilter::Info)
+        .try_init()
+        .unwrap();
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -18,8 +38,7 @@ fn _gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<dataloader::GenomeDataLoaderMap>()?;
     m.add_class::<dataloader::CatGenomeDataLoader>()?;
 
-    m.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, m)?)?;
+    utils::register_utils(m)?;
 
-    m.add_function(wrap_pyfunction!(bam::bam_cov, m)?)?;
     Ok(())
 }

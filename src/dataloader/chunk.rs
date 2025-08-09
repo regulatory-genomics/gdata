@@ -104,9 +104,9 @@ impl Values {
         Ok(bincode::decode_from_slice::<_, Configuration>(&data, Configuration::default())?.0)
     }
 
-    fn encode(self) -> Result<Vec<u8>> {
+    fn encode(self, compression: u8) -> Result<Vec<u8>> {
         let data = bincode::encode_to_vec::<_, Configuration>(self, Configuration::default())?;
-        let data = compress_data_zst(data);
+        let data = compress_data_zst(data, compression);
         Ok(data)
     }
 }
@@ -188,6 +188,7 @@ pub struct DataChunk {
     pub(crate) segments: Vec<GenomicRange>, // Genomic segments contained in this chunk
     trim_target: Option<usize>,             // Output trimming
     split_data: Option<(usize, usize)>, // Optional size for splitting data, 1st is for sequences, 2nd for values
+    aggregation: Option<usize>, // Optional aggregation size for the data store
     data_store: DataStore,              // Data store
     subset: Option<Vec<usize>>,         // Optional indices representing a subset of the data
 }
@@ -202,6 +203,7 @@ impl DataChunk {
             segments,
             trim_target: None,
             split_data: None,
+            aggregation: None,
             data_store: DataStore::create(location.as_ref().join("data"))?,
             subset: None,
         })
@@ -225,6 +227,7 @@ impl DataChunk {
             segments,
             trim_target: None,
             split_data: None,
+            aggregation: None,
             data_store: DataStore::open(store_path, writable)?,
             subset: None,
         })
@@ -242,7 +245,7 @@ impl DataChunk {
 
     /// Set the aggregation size for the data store.
     pub fn set_aggregation(&mut self, aggregation: usize) {
-        self.data_store.aggregation = Some(aggregation);
+        self.aggregation = Some(aggregation);
     }
 
     /// indices must be unique and sorted
@@ -301,7 +304,7 @@ impl DataChunk {
     }
 
     pub fn read(&mut self, idx: &[usize]) -> Result<Values> {
-        let mut data = self.data_store.read(idx);
+        let mut data = self.data_store.read(idx, self.aggregation);
         if let Some(idx) = self.subset.as_ref() {
             data = data.select_rows(idx);
         }
@@ -320,7 +323,7 @@ impl DataChunk {
     }
 
     pub fn read_keys(&mut self, keys: &[String]) -> Result<Values> {
-        let mut data = self.data_store.read_keys(keys);
+        let mut data = self.data_store.read_keys(keys, self.aggregation);
         if let Some(idx) = self.subset.as_ref() {
             data = data.select_rows(idx);
         }
@@ -341,7 +344,7 @@ impl DataChunk {
     pub fn read_all(&mut self) -> Values {
         let arrs: Vec<_> = self
             .data_store
-            .iter_chunks()
+            .iter_chunks(self.aggregation)
             .flat_map_iter(|chunk| {
                 chunk.into_iter().map(|mut data| {
                     if let Some(idx) = self.subset.as_ref() {
@@ -368,7 +371,7 @@ impl DataChunk {
         Values(data)
     }
 
-    pub fn save_seqs(&self, seqs: Vec<Vec<u8>>) -> Result<()> {
+    pub fn save_seqs(&self, seqs: Vec<Vec<u8>>, compression: u8) -> Result<()> {
         let shape = (seqs.len(), seqs[0].len());
         let seqs: Result<Vec<u8>> = seqs
             .into_iter()
@@ -377,7 +380,7 @@ impl DataChunk {
             .collect();
         let seqs = Sequences(Array2::from_shape_vec(shape, seqs?)?);
         let seqs = bincode::encode_to_vec::<_, Configuration>(seqs, Default::default())?;
-        let seqs = compress_data_zst(seqs);
+        let seqs = compress_data_zst(seqs, compression);
         std::fs::write(self.location.join("sequence.dat"), seqs)?;
         Ok(())
     }
@@ -386,7 +389,23 @@ impl DataChunk {
         &mut self,
         data: impl IntoParallelIterator<Item = (String, Values)>,
     ) -> Result<()> {
-        self.data_store.write_par(data)
+        self.data_store.write_par(data, 9)
+    }
+
+    pub fn compress(&mut self, lvl: u8) -> Result<()> {
+        // compress sequences
+        let seq_file = self.location.join("sequence.dat");
+        let seqs = Sequences::decode(&std::fs::read(&seq_file)?)?;
+        let seqs = bincode::encode_to_vec(seqs, bincode::config::standard())?; 
+        let seqs = compress_data_zst(seqs, lvl);
+        std::fs::write(seq_file, seqs)?;
+
+        // compress data store
+        let data: Vec<_> = self.data_store.iter_chunks(None).flatten().collect();
+        let data: Vec<_> = self.data_store.index.keys().cloned().zip(data.into_iter()).collect();
+        self.data_store.clear()?;
+        self.data_store.write_par(data, lvl)?;
+        Ok(())
     }
 }
 
@@ -413,10 +432,17 @@ impl DataStoreIndex {
 struct DataStore {
     index: DataStoreIndex,
     file: std::fs::File,
-    aggregation: Option<usize>,
 }
 
 impl DataStore {
+    fn clear(&mut self) -> Result<()> {
+        self.index = DataStoreIndex(IndexMap::new());
+        self.file.set_len(0)?;
+        self.file.rewind()?;
+        self.write_index()?;
+        Ok(())
+    }
+
     fn create(location: impl AsRef<Path>) -> Result<Self> {
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -435,7 +461,6 @@ impl DataStore {
         let mut store = Self {
             index,
             file,
-            aggregation: None,
         };
         store.write_index()?;
         Ok(store)
@@ -470,7 +495,6 @@ impl DataStore {
         Ok(Self {
             index,
             file,
-            aggregation: None,
         })
     }
 
@@ -484,7 +508,7 @@ impl DataStore {
         Ok(self.file.seek(std::io::SeekFrom::Start(start))?)
     }
 
-    fn read(&mut self, idx: &[usize]) -> Values {
+    fn read(&mut self, idx: &[usize], aggregation: Option<usize>) -> Values {
         let result = idx
             .iter()
             .map(|i| {
@@ -495,7 +519,7 @@ impl DataStore {
                 let mut buffer = vec![0; size];
                 self.file.read_exact(&mut buffer).unwrap();
                 let mut data = Values::decode(&buffer).unwrap();
-                if let Some(aggregation) = self.aggregation {
+                if let Some(aggregation) = aggregation {
                     data = data.aggregate_by_length(aggregation);
                 }
                 data.0
@@ -505,7 +529,7 @@ impl DataStore {
         Values(ndarray::concatenate(Axis(2), &result).unwrap())
     }
 
-    fn read_keys(&mut self, keys: &[String]) -> Values {
+    fn read_keys(&mut self, keys: &[String], aggregation: Option<usize>) -> Values {
         let result = keys
             .iter()
             .map(|key| {
@@ -516,7 +540,7 @@ impl DataStore {
                 let mut buffer = vec![0; size];
                 self.file.read_exact(&mut buffer).unwrap();
                 let mut data = Values::decode(&buffer).unwrap();
-                if let Some(aggregation) = self.aggregation {
+                if let Some(aggregation) = aggregation {
                     data = data.aggregate_by_length(aggregation);
                 }
                 data.0
@@ -526,7 +550,7 @@ impl DataStore {
         Values(ndarray::concatenate(Axis(2), &result).unwrap())
     }
 
-    fn iter_chunks(&mut self) -> impl ParallelIterator<Item = Vec<Values>> + '_ {
+    fn iter_chunks(&mut self, aggregation: Option<usize>) -> impl ParallelIterator<Item = Vec<Values>> + '_ {
         self.file.rewind().unwrap();
         let mut buf = Vec::new();
         self.file.read_to_end(&mut buf).unwrap();
@@ -539,12 +563,11 @@ impl DataStore {
             .map(|x| x.collect())
             .collect();
 
-        let agg = self.aggregation.clone();
         chunks.into_par_iter().map(move |c| {
             c.into_iter()
                 .map(|&(i, n)| {
                     let mut data = Values::decode(&buf[i..i + n]).unwrap();
-                    if let Some(aggregation) = agg {
+                    if let Some(aggregation) = aggregation {
                         data = data.aggregate_by_length(aggregation);
                     }
                     data
@@ -556,10 +579,11 @@ impl DataStore {
     fn write_par(
         &mut self,
         data: impl IntoParallelIterator<Item = (String, Values)>,
+        compression: u8,
     ) -> Result<()> {
         let data: Vec<_> = data
             .into_par_iter()
-            .map(|(key, values)| (key, values.encode().unwrap()))
+            .map(|(key, values)| (key, values.encode(compression).unwrap()))
             .collect();
         let mut offset = self.seek_insert_loc()? as usize;
         data.into_iter().for_each(|(key, buffer)| {
@@ -600,8 +624,8 @@ pub(crate) fn decode_nucleotide(base: u8) -> Result<u8> {
     Ok(b)
 }
 
-fn compress_data_zst(data: Vec<u8>) -> Vec<u8> {
-    zstd::bulk::Compressor::new(9)
+fn compress_data_zst(data: Vec<u8>, lvl: u8) -> Vec<u8> {
+    zstd::bulk::Compressor::new(lvl as i32)
         .unwrap()
         .compress(&data)
         .unwrap()
@@ -669,11 +693,11 @@ mod tests {
             .write_par(vec![
                 ("key1".to_string(), values1),
                 ("key2".to_string(), values2),
-            ])
+            ], 9)
             .unwrap();
 
         let read_values = store
-            .read_keys(&["key1".to_string(), "key2".to_string()])
+            .read_keys(&["key1".to_string(), "key2".to_string()], None)
             .0
             .as_standard_layout()
             .to_owned();
