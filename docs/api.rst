@@ -25,6 +25,7 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
+    utils.Transcript
     utils.W5Z
     utils.bw_to_w5z
     utils.bam_cov

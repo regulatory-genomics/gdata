@@ -24,19 +24,49 @@ use noodles::{core::Position, gff::{self, feature::record::Strand}};
 use noodles::gff::feature::Record;
 use std::{fmt::Debug, io::BufReader, path::PathBuf};
 
-/// Position is 1-based.
+/// Position is 0-based.
 #[pyclass]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transcript {
+    #[pyo3(get)]
     pub transcript_name: Option<String>,
+    #[pyo3(get)]
     pub transcript_id: String,
+    #[pyo3(get)]
     pub gene_name: String,
+    #[pyo3(get)]
     pub gene_id: String,
+    #[pyo3(get)]
     pub is_coding: Option<bool>,
+    #[pyo3(get)]
     pub chrom: String,
     pub left: Position,
     pub right: Position,
     pub strand: Strand,
+}
+
+#[pymethods]
+impl Transcript {
+    #[getter]
+    fn get_start(&self) -> usize {
+        self.left.get() - 1
+    }
+    
+    #[getter]
+    fn get_end(&self) -> usize {
+        self.right.get()
+    }
+
+    #[getter]
+    fn get_strand(&self) -> &str {
+        if self.strand == Strand::Forward {
+            "+"
+        } else if self.strand == Strand::Reverse {
+            "-"
+        } else {
+            panic!("Strand is not set")
+        }
+    }
 }
 
 pub struct TranscriptParserOptions {
@@ -128,6 +158,7 @@ pub fn read_transcripts(
     };
     let reader = std::fs::File::open(&gff_file)
         .with_context(|| format!("failed to open GFF file: {:?}", gff_file))?;
+    let reader = flate2::read::MultiGzDecoder::new(reader);
     let mut reader = gff::io::Reader::new(BufReader::new(reader));
     let mut results = Vec::new();
     for record in reader.record_bufs() {

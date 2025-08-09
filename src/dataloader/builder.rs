@@ -229,6 +229,7 @@ impl GenomeDataBuilder {
         }
 
         if let Some(segments) = segments {
+            assert!(segments.iter().all_unique(), "Segments must be unique");
             let mut all_chroms = HashSet::new();
             let mut segments = segments
                 .into_iter()

@@ -12,5 +12,7 @@ pub(crate) fn register_utils(parent_module: &Bound<'_, PyModule>) -> PyResult<()
     utils.add_function(wrap_pyfunction!(bam::bam_cov, &utils)?)?;
     utils.add_function(wrap_pyfunction!(gff::read_transcripts, &utils)?)?;
 
+    utils.add_class::<gff::Transcript>()?;
+
     parent_module.add_submodule(&utils)
 }
