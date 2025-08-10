@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::dataloader::chunk::{DataChunk, Sequences};
+use super::chunk::{DataChunk, Sequences};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReadChunkOptions {

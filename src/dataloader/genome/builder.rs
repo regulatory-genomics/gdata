@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs::File, io::BufRead, path::Path};
 
-use crate::dataloader::chunk::{DataChunk, Values};
-use crate::dataloader::index::{make_seq_index, ChunkIndex, ReadChunkOptions};
+use super::chunk::{DataChunk, Values};
+use super::index::{make_seq_index, ChunkIndex, ReadChunkOptions};
 use crate::w5z::W5Z;
 
 /** Represents a builder for genomic data, allowing for the creation and management of genomic datasets.
@@ -38,12 +38,10 @@ use crate::w5z::W5Z;
     ├── chr1/
     │   ├── 0/
     │   │   ├── data
-    |   |   ├── data.index
     │   │   ├── sequence.dat
     |   |   └── names.txt
     │   |── 1/
     │   │   ├── data
-    |   |   ├── data.index
     │   │   ├── sequence.dat
     |   |   └── names.txt
     ```
@@ -386,7 +384,13 @@ impl GenomeDataBuilder {
                     .map(|(key, path)| (key, W5Z::open(path).unwrap()))
                     .collect::<Vec<_>>();
                 self.seq_index
-                    .iter_chunks::<ThreadRng>(ReadChunkOptions { write: true, ..Default::default()}, None)
+                    .iter_chunks::<ThreadRng>(
+                        ReadChunkOptions {
+                            write: true,
+                            ..Default::default()
+                        },
+                        None,
+                    )
                     .chunk_by(|x| x.segments[0].chrom().to_string())
                     .into_iter()
                     .for_each(|(chrom, group)| {
@@ -470,7 +474,13 @@ impl GenomeDataBuilder {
     */
     fn compress(&self, compression_lvl: u8) -> Result<()> {
         self.seq_index
-            .iter_chunks::<ThreadRng>(ReadChunkOptions { write: true, ..Default::default()}, None)
+            .iter_chunks::<ThreadRng>(
+                ReadChunkOptions {
+                    write: true,
+                    ..Default::default()
+                },
+                None,
+            )
             .for_each(|mut chunk| {
                 chunk.compress(compression_lvl).unwrap();
             });

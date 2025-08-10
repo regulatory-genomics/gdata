@@ -14,6 +14,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::dataloader::{compress_data_zst, decompress_data_zst};
+
 #[derive(Debug, Clone, Decode, Encode, PartialEq)]
 pub struct Values(#[bincode(with_serde)] pub Array3<bf16>);
 
@@ -622,20 +624,6 @@ pub(crate) fn decode_nucleotide(base: u8) -> Result<u8> {
         _ => bail!("Invalid DNA base: {}", base),
     };
     Ok(b)
-}
-
-fn compress_data_zst(data: Vec<u8>, lvl: u8) -> Vec<u8> {
-    zstd::bulk::Compressor::new(lvl as i32)
-        .unwrap()
-        .compress(&data)
-        .unwrap()
-}
-
-fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
-    let mut decoder = zstd::Decoder::new(buffer).unwrap();
-    let mut decompressed_data = Vec::new();
-    decoder.read_to_end(&mut decompressed_data).unwrap();
-    decompressed_data
 }
 
 fn read_index_from_file(file: &mut std::fs::File) -> Result<DataStoreIndex> {

@@ -1,6 +1,6 @@
-mod w5z;
-mod dataloader;
-mod utils;
+pub mod w5z;
+pub mod dataloader;
+pub mod utils;
 
 use pyo3::prelude::*;
 use std::io::Write;
@@ -33,10 +33,10 @@ fn gdata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     m.add_class::<w5z::W5Z>()?;
-    m.add_class::<dataloader::GenomeDataBuilder>()?;
-    m.add_class::<dataloader::GenomeDataLoader>()?;
-    m.add_class::<dataloader::GenomeDataLoaderMap>()?;
-    m.add_class::<dataloader::CatGenomeDataLoader>()?;
+    m.add_class::<dataloader::genome::GenomeDataBuilder>()?;
+    m.add_class::<dataloader::genome::GenomeDataLoader>()?;
+    m.add_class::<dataloader::genome::GenomeDataLoaderMap>()?;
+    m.add_class::<dataloader::genome::CatGenomeDataLoader>()?;
 
     utils::register_utils(m)?;
 

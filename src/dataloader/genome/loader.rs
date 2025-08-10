@@ -13,9 +13,9 @@ use std::str::FromStr;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
-use crate::dataloader::builder::GenomeDataBuilder;
-use crate::dataloader::chunk::Sequences;
-use crate::dataloader::index::ReadChunkOptions;
+use super::builder::GenomeDataBuilder;
+use super::chunk::Sequences;
+use super::index::ReadChunkOptions;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
