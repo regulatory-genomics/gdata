@@ -25,6 +25,7 @@ impl DataLoader {
             .write(true)
             .read(true)
             .append(false)
+            .truncate(true)
             .create(true)
             .open(&data_file)
             .with_context(|| {

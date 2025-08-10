@@ -10,9 +10,11 @@ pub(crate) fn register_utils(parent_module: &Bound<'_, PyModule>) -> PyResult<()
 
     utils.add_function(wrap_pyfunction!(bigwig::bw_to_w5z, &utils)?)?;
     utils.add_function(wrap_pyfunction!(bam::bam_cov, &utils)?)?;
-    utils.add_function(wrap_pyfunction!(gff::read_transcripts, &utils)?)?;
 
+    utils.add_class::<gff::Gene>()?;
     utils.add_class::<gff::Transcript>()?;
+    utils.add_function(wrap_pyfunction!(gff::read_genes, &utils)?)?;
+    utils.add_function(wrap_pyfunction!(gff::read_transcripts, &utils)?)?;
 
     parent_module.add_submodule(&utils)
 }
