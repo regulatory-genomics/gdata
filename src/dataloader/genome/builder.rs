@@ -30,21 +30,19 @@ use crate::w5z::W5Z;
     and manage genomic data chunks. It supports operations like adding files, retrieving chromosome
     information, and iterating over data chunks.
 
-    The builder creates a structured dataset in a specified location:
+    The builder creates a structured dataset in a specified location::
 
-    ```
-    root/
-    ├── metadata.json
-    ├── chr1/
-    │   ├── 0/
-    │   │   ├── data
-    │   │   ├── sequence.dat
-    |   |   └── names.txt
-    │   |── 1/
-    │   │   ├── data
-    │   │   ├── sequence.dat
-    |   |   └── names.txt
-    ```
+        root/
+        ├── metadata.json
+        ├── chr1/
+        │   ├── 0/
+        │   │   ├── data
+        │   │   ├── sequence.dat
+        |   |   └── names.txt
+        │   |── 1/
+        │   │   ├── data
+        │   │   ├── sequence.dat
+        |   |   └── names.txt
 
     Parameters
     ----------
@@ -228,7 +226,7 @@ impl GenomeDataBuilder {
 
         if let Some(segments) = segments {
             let mut all_chroms = HashSet::new();
-            let mut segments: Vec<_> = segments
+            let segment_iter = segments
                 .into_iter()
                 .map(|s| {
                     let mut g = GenomicRange::from_str(&s).unwrap();
@@ -237,10 +235,10 @@ impl GenomeDataBuilder {
                     g
                 })
                 .unique() // Ensure segments are unique
-                .collect();
-            segments.sort();
+                .sorted()
+                .chunk_by(|x| x.chrom().to_string());
             write_seqs(
-                &segments.into_iter().chunk_by(|x| x.chrom().to_string()),
+                &segment_iter,
                 &location,
                 &mut reader,
                 window_size,
