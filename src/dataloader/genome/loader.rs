@@ -94,6 +94,7 @@ pub struct GenomeDataLoader {
     builder: GenomeDataBuilder,
     resolution: Option<u64>,
     window_size: Option<u64>,
+    #[pyo3(get, set)]
     batch_size: usize,
     trim_target: Option<usize>,
     scale: Option<f32>,
@@ -345,11 +346,6 @@ impl GenomeDataLoader {
     #[getter]
     fn resolution(&self) -> u64 {
         self.resolution.unwrap_or(self.builder.resolution)
-    }
-
-    #[getter]
-    fn batch_size(&self) -> usize {
-        self.batch_size
     }
 
     /** Returns the sequence indexer for accessing genomic sequences.
