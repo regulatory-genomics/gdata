@@ -14,7 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::dataloader::{compress_data_zst, decompress_data_zst};
+use super::super::generic::{compress_data_zst, decompress_data_zst};
 
 #[derive(Debug, Clone, Decode, Encode, PartialEq)]
 pub struct Values(#[bincode(with_serde)] pub Array3<bf16>);

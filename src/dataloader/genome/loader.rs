@@ -10,9 +10,8 @@ use rand_chacha::ChaCha12Rng;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::mpsc::{sync_channel, Receiver};
-use std::sync::{Arc, Mutex};
 
+use super::super::generic::PrefethIterator;
 use super::builder::GenomeDataBuilder;
 use super::chunk::Sequences;
 use super::index::ReadChunkOptions;
@@ -207,9 +206,7 @@ impl GenomeDataLoader {
         };
         let opts = ReadChunkOptions {
             split_data,
-            trim_target: self
-                .trim_target
-                .map(|t| t / resolution as usize),
+            trim_target: self.trim_target.map(|t| t / resolution as usize),
             aggregation,
             scale: self.scale,
             clamp_max: self.clamp_max,
@@ -795,34 +792,6 @@ impl DataLoaderIter {
     }
 }
 
-pub struct PrefethIterator<T>(Arc<Mutex<Receiver<T>>>);
-
-impl<T: Send + 'static> PrefethIterator<T> {
-    fn new<I>(iter: I, buffer_size: usize) -> Self
-    where
-        I: Iterator<Item = T> + Send + 'static,
-    {
-        let (sender, receiver) = sync_channel(buffer_size);
-        std::thread::spawn(move || {
-            for item in iter {
-                if sender.send(item).is_err() {
-                    // If the receiver is dropped, we stop sending more items.
-                    break;
-                }
-            }
-        });
-        Self(Arc::new(Mutex::new(receiver)))
-    }
-}
-
-impl<T: Send + 'static> Iterator for PrefethIterator<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.lock().unwrap().recv().ok()
-    }
-}
-
 #[pyclass]
 pub struct SeqIndexer(Py<GenomeDataLoader>);
 
@@ -835,7 +804,7 @@ impl SeqIndexer {
             .get(&GenomicRange::from_str(key).unwrap())
             .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
         let mut opts = py_ref.get_read_chunk_opts();
-        opts.split_data = None;  // Do not split data
+        opts.split_data = None; // Do not split data
         Ok(chunk.open(&opts)?.get_seq_at(*i)?)
     }
 }
@@ -890,7 +859,7 @@ impl DataIndexer {
         };
 
         let mut opts = loader.get_read_chunk_opts();
-        opts.split_data = None;  // Do not split data
+        opts.split_data = None; // Do not split data
         let mut chunk = chunk.open(&opts)?;
 
         let arr = if let Ok(j_) = data_index.extract::<Vec<String>>() {
