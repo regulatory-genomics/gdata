@@ -227,18 +227,17 @@ impl GenomeDataBuilder {
         }
 
         if let Some(segments) = segments {
-            assert!(segments.iter().all_unique(), "Segments must be unique");
             let mut all_chroms = HashSet::new();
-            let mut segments = segments
+            let mut segments: Vec<_> = segments
                 .into_iter()
                 .map(|s| {
-                    let mut g = GenomicRange::from_str(&s)
-                        .map_err(|_| anyhow::anyhow!("Failed to parse segment '{}'", s))?;
+                    let mut g = GenomicRange::from_str(&s).unwrap();
                     all_chroms.insert(g.chrom().to_string());
                     expand_segment(&mut g, window_size, &chrom_sizes);
-                    Ok(g)
+                    g
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .unique() // Ensure segments are unique
+                .collect();
             segments.sort();
             write_seqs(
                 &segments.into_iter().chunk_by(|x| x.chrom().to_string()),
