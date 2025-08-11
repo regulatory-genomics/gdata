@@ -26,7 +26,7 @@ print(f'Building documentation for gdata {release} (short version: {version}, sw
 
 # -- Project information -----------------------------------------------------
 
-project = 'gdata'
+project = 'genomics-dataloader'
 copyright = '2025, Regulatory Genomics Lab, Westlake University'
 author = 'Kai Zhang'
 
@@ -119,7 +119,7 @@ html_theme_options = {
         "alt_text": "gdata",
     },
 
-    "github_url": "https://github.com/regulatory-genomics/gdata",
+    "github_url": "https://github.com/regulatory-genomics/genomics-dataloader",
     "external_links": [
     ],
     "header_links_before_dropdown": 6,
@@ -131,6 +131,6 @@ html_theme_options = {
 
     "switcher": {
         "version_match": switcher_version,
-        "json_url": "https://raw.githubusercontent.com/regulatory-genomics/gdata/refs/heads/main/docs/_static/versions.json",
+        "json_url": "https://raw.githubusercontent.com/regulatory-genomics/genomics-dataloader/refs/heads/main/docs/_static/versions.json",
     },
 }

@@ -83,7 +83,7 @@ jobs:
 
     - name: Fetch JSON and Get Preferred Version
       run: |
-        JSON=$(curl -s "https://raw.githubusercontent.com/regulatory-genomics/gdata/main/docs/_static/versions.json")
+        JSON=$(curl -s "https://raw.githubusercontent.com/regulatory-genomics/genomics-dataloader/main/docs/_static/versions.json")
         VERSION=$(echo "$JSON" | jq -r '.[] | select(.preferred == true) | .version')
         echo "PREFERRED_VERSION=$VERSION" >> $GITHUB_ENV
         echo "Preferred version is $VERSION"

@@ -1,5 +1,5 @@
-precellar: Single-cell genomics data preprocessing tools
-========================================================
+genomics-dataloader: Dataloader for Genomics Data
+=================================================
 
 .. toctree::
    :maxdepth: 3
