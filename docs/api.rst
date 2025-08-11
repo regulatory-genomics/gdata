@@ -18,6 +18,7 @@ Core Classes
     GenomeDataLoaderMap
     CatGenomeDataLoader
     GenomeDataBuilder
+    DataLoader
 
 Utilities
 ~~~~~~~~~
@@ -25,8 +26,10 @@ Utilities
 .. autosummary::
     :toctree: _autosummary
 
-    utils.Transcript
     utils.W5Z
+    utils.Gene
+    utils.Transcript
+    utils.read_genes
+    utils.read_transcripts
     utils.bw_to_w5z
     utils.bam_cov
-    utils.read_transcripts

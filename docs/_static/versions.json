@@ -2,12 +2,12 @@
     {
         "name": "dev",
         "version": "dev",
-        "url": "https://lab.kaizhang.org/gdata/version/dev/"
+        "url": "https://lab.kaizhang.org/genomics-dataloader/version/dev/"
     },
     {
-        "name": "0.1 (stable)",
-        "version": "0.1",
+        "name": "0.4 (stable)",
+        "version": "0.4",
         "preferred": true,
-        "url": "https://lab.kaizhang.org/gdata/version/0.1/"
+        "url": "https://lab.kaizhang.org/genomics-dataloader/version/0.4/"
     }
 ]

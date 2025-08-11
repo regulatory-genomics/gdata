@@ -211,6 +211,7 @@ impl<T: Send + 'static> Iterator for PrefethIterator<T> {
     }
 }
 
+/// Compress data using Zstandard with the specified compression level.
 pub(crate) fn compress_data_zst(data: Vec<u8>, lvl: u8) -> Vec<u8> {
     zstd::bulk::Compressor::new(lvl as i32)
         .unwrap()
@@ -218,6 +219,7 @@ pub(crate) fn compress_data_zst(data: Vec<u8>, lvl: u8) -> Vec<u8> {
         .unwrap()
 }
 
+/// Decompress data using Zstandard.
 pub(crate) fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     let mut decoder = zstd::Decoder::new(buffer).unwrap();
     let mut decompressed_data = Vec::new();
