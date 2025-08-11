@@ -46,7 +46,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: dist
-        pattern: gdata-*
+        pattern: genomics_dataloader-*
         merge-multiple: true
 
     - name: Delete Release
