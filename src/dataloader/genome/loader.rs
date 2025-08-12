@@ -215,7 +215,7 @@ impl GenomeDataLoader {
         opts
     }
 
-    pub fn iter(&mut self) -> DataLoaderIter {
+    pub fn iter(&mut self) -> GenomeDataLoaderIter {
         let opts = self.get_read_chunk_opts();
         let shuffle = if self.shuffle {
             Some(&mut self.rng)
@@ -227,7 +227,7 @@ impl GenomeDataLoader {
             .seq_index
             .iter_chunk_data(opts, shuffle, self.prefetch);
 
-        DataLoaderIter {
+        GenomeDataLoaderIter {
             iter: PrefethIterator::new(
                 _DataLoaderIter {
                     batch_size: self.batch_size,
@@ -619,7 +619,7 @@ else:
         self.len()
     }
 
-    fn __iter__(mut slf: PyRefMut<'_, Self>) -> DataLoaderIter {
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> GenomeDataLoaderIter {
         slf.iter()
     }
 
@@ -629,12 +629,12 @@ else:
 }
 
 #[pyclass]
-pub struct DataLoaderIter {
+pub struct GenomeDataLoaderIter {
     iter: PrefethIterator<(Sequences, ArrayD<f32>)>,
     seq_as_string: bool,
 }
 
-impl Iterator for DataLoaderIter {
+impl Iterator for GenomeDataLoaderIter {
     type Item = (Sequences, ArrayD<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -772,7 +772,7 @@ impl<T: Iterator<Item = (Sequences, Array3<f32>)>> Iterator for _DataLoaderIter<
 }
 
 #[pymethods]
-impl DataLoaderIter {
+impl GenomeDataLoaderIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -793,7 +793,7 @@ impl DataLoaderIter {
 }
 
 #[pyclass]
-pub struct SeqIndexer(Py<GenomeDataLoader>);
+struct SeqIndexer(Py<GenomeDataLoader>);
 
 impl SeqIndexer {
     fn get(&self, py: Python<'_>, key: &str) -> Result<Array1<u8>> {
@@ -826,7 +826,7 @@ impl SeqIndexer {
 }
 
 #[pyclass]
-pub struct DataIndexer(Py<GenomeDataLoader>);
+struct DataIndexer(Py<GenomeDataLoader>);
 
 #[pymethods]
 impl DataIndexer {
@@ -1132,7 +1132,7 @@ impl GenomeDataLoaderMap {
 }
 
 #[pyclass]
-pub struct MultiDataLoaderIter(IndexMap<String, DataLoaderIter>);
+pub struct MultiDataLoaderIter(IndexMap<String, GenomeDataLoaderIter>);
 
 impl Iterator for MultiDataLoaderIter {
     type Item = (Sequences, IndexMap<String, ArrayD<f32>>);

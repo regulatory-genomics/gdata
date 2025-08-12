@@ -1,24 +1,21 @@
-use ndarray::ArrayD;
+use ndarray::{Array, ArrayBase, ArrayD, Dimension};
 use numpy::{PyArrayDyn, PyArrayMethods};
 use pyo3::{prelude::*, types::PyType};
-use std::{
-    fs::File, io::{Read, Seek, Write}, path::{Path, PathBuf}
-};
+use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
+use rayon::str;
+use serde::Serialize;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    fs::File,
+    io::{Read, Seek, Write},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
-/** A generic data loader that serializes data items to a file and allows iteration over them.
-    
-    Parameters
-    ----------
-    data : Iterator
-        An iterator that yields data items to be serialized and stored.
-    data_file : str
-        The path to the file where the serialized data will be stored.
-*/
-#[pyclass]
+/// A generic data loader that serializes data items to a file and allows iteration over them.
 pub struct DataLoader {
     path: PathBuf,
     sizes: Vec<usize>,
@@ -31,8 +28,12 @@ impl DataLoader {
         I: Iterator<Item = D>,
         D: serde::Serialize,
     {
-        let mut file = File::create(&data_file)
-            .with_context(|| format!("Failed to create data file at {}", data_file.as_ref().display()))?;
+        let mut file = File::create(&data_file).with_context(|| {
+            format!(
+                "Failed to create data file at {}",
+                data_file.as_ref().display()
+            )
+        })?;
 
         let sizes = data
             .map(|item| {
@@ -52,16 +53,25 @@ impl DataLoader {
         file.write_all(&pos.to_le_bytes())?;
         file.write_all(&(n_bytes as u32).to_le_bytes())?;
 
-        Ok(Self { path: data_file.as_ref().to_path_buf(), sizes })
+        Ok(Self {
+            path: data_file.as_ref().to_path_buf(),
+            sizes,
+        })
     }
 
     pub fn open(data_file: impl AsRef<Path>) -> Result<Self> {
-        let mut file = File::open(&data_file)
-            .with_context(|| format!("Failed to open data file at {}", data_file.as_ref().display()))?;
+        let mut file = File::open(&data_file).with_context(|| {
+            format!(
+                "Failed to open data file at {}",
+                data_file.as_ref().display()
+            )
+        })?;
         let file_size = file.metadata()?.len();
 
         if file_size < 12 {
-            return Err(anyhow::anyhow!("Data file is too small to contain index information"));
+            return Err(anyhow::anyhow!(
+                "Data file is too small to contain index information"
+            ));
         }
 
         file.seek(std::io::SeekFrom::End(-12))?;
@@ -75,7 +85,9 @@ impl DataLoader {
         let n_bytes = u32::from_le_bytes(n_bytes_bytes) as usize;
 
         if pos + n_bytes as u64 + 12 != file_size {
-            return Err(anyhow::anyhow!("Index position and size do not match file size"));
+            return Err(anyhow::anyhow!(
+                "Index position and size do not match file size"
+            ));
         }
 
         file.seek(std::io::SeekFrom::Start(pos))?;
@@ -85,38 +97,78 @@ impl DataLoader {
 
         let sizes = bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
 
-        Ok(Self { path: data_file.as_ref().to_path_buf(), sizes })
+        Ok(Self {
+            path: data_file.as_ref().to_path_buf(),
+            sizes,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.sizes.len()
     }
 
     fn iter<T>(&self) -> DataLoaderIter<T> {
         let file = File::open(&self.path).expect("Failed to open data file");
-        DataLoaderIter { file, sizes: self.sizes.clone(), pos: 0, _phantom: std::marker::PhantomData }
+        DataLoaderIter {
+            file,
+            sizes: self.sizes.clone(),
+            pos: 0,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+/** A array data loader that serializes numpy arrays to a file and allows iteration over them.
+
+    Parameters
+    ----------
+    data : Iterator
+        An iterator that yields data items to be serialized and stored.
+    data_file : str
+        The path to the file where the serialized data will be stored.
+*/
+#[pyclass]
+pub(crate) struct PyArrayDataLoader(DataLoader);
+
+struct PyArrayWrapper<'py, T>(Bound<'py, PyArrayDyn<T>>);
+
+impl<T: Serialize + numpy::Element> Serialize for PyArrayWrapper<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let array = self.0.readonly();
+        array.as_array().serialize(serializer)
     }
 }
 
 #[pymethods]
-impl DataLoader {
+impl PyArrayDataLoader {
     #[new]
     #[pyo3(
         signature = (data, data_file),
         text_signature = "($self, data, data_file)"
     )]
-    pub fn new_py(data: Bound<'_, PyAny>, data_file: PathBuf) -> Result<Self> {
+    pub fn new(data: Bound<'_, PyAny>, data_file: PathBuf) -> Result<Self> {
         let iter = data.try_iter()?.map(|item| {
-            let item = item.unwrap();
-            let (input, target): (Bound<'_, PyArrayDyn<f32>>, Bound<'_, PyArrayDyn<f32>>) = item.extract().unwrap();
-            (input.to_owned_array(), target.to_owned_array())
+            let arr: Bound<'_, PyArrayDyn<f32>>= item.unwrap().extract().unwrap();
+            PyArrayWrapper(arr)
         });
-        Self::new(iter, data_file)
+        let dataloader = DataLoader::new(
+            iter,
+            //PrefethIterator::new(iter, 32),
+            data_file,
+        )?;
+        Ok(Self(dataloader))
     }
 
     /** Open an existing DataLoader from a data file.
-        
+
         Parameters
         ----------
         data_file
             The path to the file where the serialized data is stored.
-        
+
         Returns
         -------
         DataLoader
@@ -124,16 +176,19 @@ impl DataLoader {
     */
     #[classmethod]
     #[pyo3(
-        name = "open",
         signature = (data_file),
         text_signature = "(data_file)"
     )]
-    fn open_py(_cls: &Bound<'_, PyType>, data_file: PathBuf) -> Result<Self> {
-        Self::open(data_file)
+    fn open(_cls: &Bound<'_, PyType>, data_file: PathBuf) -> Result<Self> {
+        Ok(Self(DataLoader::open(data_file)?))
+    }
+
+    fn __len__(&self) -> usize {
+        self.0.len()
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyDataLoaderIter {
-        let iter = slf.iter();
+        let iter = slf.0.iter();
         PyDataLoaderIter(PrefethIterator::new(iter, 32))
     }
 }
@@ -144,6 +199,35 @@ struct DataLoaderIter<T> {
     pos: usize,
     _phantom: std::marker::PhantomData<T>,
 }
+
+/*
+impl<T: serde::de::DeserializeOwned + Send> DataLoaderIter<T> {
+    fn load_buffer(&mut self) -> Result<usize> {
+        let mut buffers = Vec::new();
+        for _ in 0..self.buffer_size {
+            if self.pos >= self.sizes.len() {
+                break;
+            }
+
+            let size = self.sizes[self.pos];
+            let mut buffer = vec![0; size];
+            self.file.read_exact(&mut buffer).context("Failed to read data from file")?;
+
+            buffers.push(buffer);
+            self.pos += 1;
+        }
+        let items: Vec<T> = buffers.into_par_iter()
+            .map(|buffer| {
+                let decompressed = decompress_data_zst(&buffer);
+                bincode::serde::decode_from_slice(&decompressed, bincode::config::standard()).unwrap().0
+            })
+            .collect();
+        let n = items.len();
+        self.buffer.extend(items);
+        Ok(n)
+    }
+}
+    */
 
 impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
     type Item = T;
@@ -158,7 +242,9 @@ impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
         self.file.read_exact(&mut buffer).unwrap();
 
         buffer = decompress_data_zst(&buffer);
-        let item = bincode::serde::decode_from_slice(&buffer, bincode::config::standard()).unwrap().0;
+        let item = bincode::serde::decode_from_slice(&buffer, bincode::config::standard())
+            .unwrap()
+            .0;
         self.pos += 1;
         Some(item)
     }
@@ -178,17 +264,20 @@ impl PyDataLoaderIter {
         py: Python<'a>,
     ) -> Option<(Bound<'a, PyArrayDyn<f32>>, Bound<'a, PyArrayDyn<f32>>)> {
         let (input, target) = slf.0.next()?;
-        Some((PyArrayDyn::from_owned_array(py, input), PyArrayDyn::from_owned_array(py, target)))
+        Some((
+            PyArrayDyn::from_owned_array(py, input),
+            PyArrayDyn::from_owned_array(py, target),
+        ))
     }
 }
 
-
+/// PrefetchIterator allows for prefetching items from an iterator into a buffer.
 pub struct PrefethIterator<T>(Arc<Mutex<Receiver<T>>>);
 
 impl<T: Send + 'static> PrefethIterator<T> {
     pub fn new<I>(iter: I, buffer_size: usize) -> Self
     where
-        I: Iterator<Item = T> + Send + 'static,
+        I: IntoIterator<Item = T> + Send + 'static,
     {
         let (sender, receiver) = sync_channel(buffer_size);
         std::thread::spawn(move || {
@@ -208,6 +297,153 @@ impl<T: Send + 'static> Iterator for PrefethIterator<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.lock().unwrap().recv().ok()
+    }
+}
+
+/// Rebatch an iterator of arrays into a specified batch size.
+pub(crate) struct ReBatch<T1, T2, D1, D2, I> {
+    batch_size: usize,
+    input_buffer: ArrayBuffer<T1, D1>,
+    target_buffer: ArrayBuffer<T2, D2>,
+    chunks: I,
+}
+
+impl<T1, T2, D1, D2, I> Iterator for ReBatch<T1, T2, D1, D2, I>
+where
+    T1: Clone,
+    T2: Clone,
+    D1: Dimension,
+    D2: Dimension,
+    I: Iterator<Item = (Array<T1, D1>, Array<T2, D2>)>,
+{
+    type Item = (Array<T1, D1>, Array<T2, D2>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let n_buffer = self.input_buffer.num_rows();
+        if n_buffer < self.batch_size {
+            if let Some((inputs, targets)) = self.chunks.next() {
+                self.input_buffer.add(inputs);
+                self.target_buffer.add(targets);
+                self.next()
+            } else {
+                if n_buffer == 0 {
+                    None
+                } else {
+                    let inputs = self
+                        .input_buffer
+                        .take_all();
+                    let targets = self.target_buffer.take_all();
+                    Some((inputs, targets))
+                }
+            }
+        } else {
+            let inputs = self.input_buffer.take(self.batch_size).unwrap();
+            let targets = self
+                .target_buffer
+                .take(self.batch_size)
+                .unwrap();
+            Some((inputs, targets))
+        }
+    }
+}
+
+/// An ArrayBuffer stores arrays as a list internally. It supports retrieving items in a batch-wise manner,
+/// e.g., rebatching the data into arrays with a specified number of records.
+struct ArrayBuffer<T, D> {
+    data: VecDeque<Vec<T>>,
+    pos: usize,
+    shape: Vec<usize>,
+    stride: usize,
+    _phantom: std::marker::PhantomData<D>,
+}
+
+impl<T: Clone, D: Dimension> ArrayBuffer<T, D> {
+    pub fn new() -> Self {
+        Self {
+            data: VecDeque::new(),
+            pos: 0,
+            shape: Vec::new(),
+            stride: 1,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Get the total number of remaining items/rows in the buffer.
+    fn num_rows(&self) -> usize {
+        let n = self.data.iter().map(|d| d.len()).sum::<usize>();
+        (n - self.pos) / self.stride
+    }
+
+    /// Add an item to the buffer. The first item determines the shape and stride of the buffer.
+    pub fn add(&mut self, item: Array<T, D>) {
+        if self.shape.is_empty() {
+            self.shape = item.shape()[1..].to_vec();
+            self.stride = self.shape.iter().product();
+        }
+        assert!(
+            item.is_standard_layout(),
+            "Buffer only supports standard layout arrays"
+        );
+        let (data, offset) = item.into_raw_vec_and_offset();
+        assert!(
+            offset.unwrap_or(0) == 0,
+            "Buffer does not support non-zero offset"
+        );
+        self.data.push_back(data);
+    }
+
+    /// Take a specified number of records from the buffer and return them as an `ArrayD`.
+    pub fn take(&mut self, n_record: usize) -> Option<Array<T, D>> {
+        if self.data.is_empty() {
+            return None;
+        }
+
+        let n = self.stride * n_record;
+        let mut result = Vec::with_capacity(n);
+        while result.len() < n && !self.data.is_empty() {
+            let remaining = self.data[0].len() - self.pos;
+            if remaining == 0 {
+                self.data.pop_front();
+                self.pos = 0;
+                continue;
+            }
+
+            let take_count = remaining.min(n - result.len());
+            result.extend_from_slice(&self.data[0][self.pos..self.pos + take_count]);
+            self.pos += take_count;
+
+            if self.pos >= self.data[0].len() {
+                self.pos = 0;
+                self.data.pop_front();
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            let shape = std::iter::once(result.len() / self.stride)
+                .chain(self.shape.iter().cloned())
+                .collect::<Vec<_>>();
+            let arr = ArrayD::from_shape_vec(shape, result)
+                .unwrap()
+                .into_dimensionality::<D>()
+                .unwrap();
+            Some(arr)
+        }
+    }
+
+    /// Take all remaining records from the buffer and return them as an `ArrayD`.
+    pub fn take_all(&mut self) -> Array<T, D> {
+        let n = self.num_rows();
+        let data: Vec<_> = self.data.drain(..).flatten().skip(self.pos).collect();
+        let shape = std::iter::once(n)
+            .chain(self.shape.iter().cloned())
+            .collect::<Vec<_>>();
+        self.pos = 0;
+        ArrayD::from_shape_vec(shape, data)
+            .unwrap()
+            .into_dimensionality::<D>()
+            .unwrap()
     }
 }
 
