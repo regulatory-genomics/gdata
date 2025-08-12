@@ -1,6 +1,7 @@
 use ndarray::{Array, ArrayD, Dimension};
 use numpy::{PyArrayDyn, PyArrayMethods};
 use pyo3::{prelude::*, types::PyType};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::str;
 use serde::Serialize;
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -112,7 +113,8 @@ impl DataLoader {
             file,
             sizes: self.sizes.clone(),
             pos: 0,
-            _phantom: std::marker::PhantomData,
+            buffer: VecDeque::new(),
+            num_workers: 16, // Default number of workers, can be adjusted
         }
     }
 }
@@ -192,7 +194,12 @@ impl PyArrayDataLoader {
     }
 
     fn __len__(&self) -> usize {
-        self.inner.len()
+        let n = self.inner.len() / self.batch_size;
+        if self.inner.len() % self.batch_size == 0 {
+            n
+        } else {
+            n + 1
+        }
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyDataLoaderIter {
@@ -205,27 +212,47 @@ struct DataLoaderIter<T> {
     file: File,
     sizes: Vec<usize>,
     pos: usize,
-    _phantom: std::marker::PhantomData<T>,
+    buffer: VecDeque<T>,
+    num_workers: usize,
 }
 
-impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
+impl<T: serde::de::DeserializeOwned + Send> DataLoaderIter<T> {
+    fn load(&mut self) {
+        if self.pos >= self.sizes.len() {
+            return
+        }
+
+        let mut results = Vec::new();
+        for _ in 0..self.num_workers {
+            if self.pos >= self.sizes.len() {
+                break;
+            }
+            let size = self.sizes[self.pos];
+            let mut b = vec![0; size];
+            self.file.read_exact(&mut b).unwrap();
+            results.push(b);
+            self.pos += 1;
+        }
+
+        let items = results.into_par_iter().map(|b| {
+            let b = decompress_data_zst(&b);
+            let item: T = bincode::serde::decode_from_slice(&b, bincode::config::standard())
+                .unwrap()
+                .0;
+            item
+        }).collect::<Vec<_>>();
+        self.buffer.extend(items);
+    }
+}
+
+impl<T: serde::de::DeserializeOwned + Send> Iterator for DataLoaderIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.sizes.len() {
-            return None;
-        }
-
-        let size = self.sizes[self.pos];
-        let mut buffer = vec![0; size];
-        self.file.read_exact(&mut buffer).unwrap();
-
-        buffer = decompress_data_zst(&buffer);
-        let item = bincode::serde::decode_from_slice(&buffer, bincode::config::standard())
-            .unwrap()
-            .0;
-        self.pos += 1;
-        Some(item)
+        self.buffer.pop_front().or_else(|| {
+            self.load();
+            self.buffer.pop_front()
+        })
     }
 }
 
