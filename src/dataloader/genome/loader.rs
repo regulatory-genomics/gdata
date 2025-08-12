@@ -2,14 +2,16 @@ use anyhow::{ensure, Context, Result};
 use bed_utils::bed::GenomicRange;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array, Array1, Array3, ArrayD, Dimension, Ix2};
-use numpy::{PyArray1, PyArray2, PyArrayDyn};
+use ndarray::{Array1, Array3};
+use numpy::{PyArray1, PyArray2, PyArray3};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use crate::dataloader::generic::ReBatch;
 
 use super::super::generic::PrefethIterator;
 use super::builder::GenomeDataBuilder;
@@ -186,8 +188,8 @@ impl GenomeDataLoader {
         let split_data = if let Some(s) = self.window_size {
             let builder_window_size = self.builder.window_size;
             assert!(
-                s < builder_window_size,
-                "Loader's window size must be less than the dataset's window size ({})",
+                s <= builder_window_size,
+                "Loader's window size is larger than the dataset's window size ({})",
                 builder_window_size,
             );
             assert!(
@@ -225,20 +227,16 @@ impl GenomeDataLoader {
         let chunks = self
             .builder
             .seq_index
-            .iter_chunk_data(opts, shuffle, self.prefetch);
-
-        GenomeDataLoaderIter {
-            iter: PrefethIterator::new(
-                _DataLoaderIter {
-                    batch_size: self.batch_size,
-                    buffer_seq: Buffer::new(),
-                    buffer_data: Buffer::new(),
-                    chunks: PrefethIterator::new(chunks, self.prefetch),
-                },
+            .iter_chunk_data(opts, shuffle, self.prefetch)
+            .map(|(s, v)| (s.0, v));
+        let chunks = PrefethIterator::new(chunks, self.prefetch);
+        let chunks_batched = ReBatch::new(chunks, self.batch_size).map(|(s, v)| (Sequences(s), v));
+        let chunks_batched = PrefethIterator::new(
+            chunks_batched,
                 self.prefetch * self.builder.get_chunk_size() / self.batch_size,
-            ),
-            seq_as_string: self.seq_as_string,
-        }
+        );
+
+        GenomeDataLoaderIter { iter: chunks_batched, seq_as_string: self.seq_as_string }
     }
 }
 
@@ -630,144 +628,15 @@ else:
 
 #[pyclass]
 pub struct GenomeDataLoaderIter {
-    iter: PrefethIterator<(Sequences, ArrayD<f32>)>,
+    iter: PrefethIterator<(Sequences, Array3<f32>)>,
     seq_as_string: bool,
 }
 
 impl Iterator for GenomeDataLoaderIter {
-    type Item = (Sequences, ArrayD<f32>);
+    type Item = (Sequences, Array3<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
-    }
-}
-
-#[derive(Debug)]
-struct Buffer<T> {
-    data: VecDeque<Vec<T>>,
-    pos: usize,
-    shape: Vec<usize>,
-    stride: usize,
-}
-
-impl<T: Clone + std::fmt::Debug> Buffer<T> {
-    fn new() -> Self {
-        Self {
-            data: VecDeque::new(),
-            pos: 0,
-            shape: Vec::new(),
-            stride: 1,
-        }
-    }
-
-    fn remaining(&self) -> usize {
-        let n = self.data.iter().map(|d| d.len()).sum::<usize>();
-        (n - self.pos) / self.stride
-    }
-
-    fn add<D: Dimension>(&mut self, item: Array<T, D>) {
-        if self.shape.is_empty() {
-            self.shape = item.shape()[1..].to_vec();
-            self.stride = self.shape.iter().product();
-        }
-        assert!(
-            item.is_standard_layout(),
-            "Buffer only supports standard layout arrays"
-        );
-        let (data, offset) = item.into_raw_vec_and_offset();
-        assert!(
-            offset.unwrap_or(0) == 0,
-            "Buffer does not support non-zero offset"
-        );
-        self.data.push_back(data);
-    }
-
-    fn take(&mut self, n_record: usize) -> Option<ArrayD<T>> {
-        if self.data.is_empty() {
-            return None;
-        }
-
-        let n = self.stride * n_record;
-        let mut result = Vec::with_capacity(n);
-        while result.len() < n && !self.data.is_empty() {
-            let remaining = self.data[0].len() - self.pos;
-            if remaining == 0 {
-                self.data.pop_front();
-                self.pos = 0;
-                continue;
-            }
-
-            let take_count = remaining.min(n - result.len());
-            result.extend_from_slice(&self.data[0][self.pos..self.pos + take_count]);
-            self.pos += take_count;
-
-            if self.pos >= self.data[0].len() {
-                self.pos = 0;
-                self.data.pop_front();
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            let shape = std::iter::once(result.len() / self.stride)
-                .chain(self.shape.iter().cloned())
-                .collect::<Vec<_>>();
-            Some(ArrayD::from_shape_vec(shape, result).unwrap())
-        }
-    }
-
-    fn take_all(&mut self) -> ArrayD<T> {
-        let n = self.remaining();
-        let data: Vec<_> = self.data.drain(..).flatten().skip(self.pos).collect();
-        let shape = std::iter::once(n)
-            .chain(self.shape.iter().cloned())
-            .collect::<Vec<_>>();
-        self.pos = 0;
-        ArrayD::from_shape_vec(shape, data).unwrap()
-    }
-}
-
-struct _DataLoaderIter<T> {
-    batch_size: usize,
-    buffer_seq: Buffer<u8>,
-    buffer_data: Buffer<f32>,
-    chunks: T,
-}
-
-impl<T: Iterator<Item = (Sequences, Array3<f32>)>> Iterator for _DataLoaderIter<T> {
-    type Item = (Sequences, ArrayD<f32>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let n_buffer = self.buffer_data.remaining();
-        if n_buffer < self.batch_size {
-            if let Some((seqs, values)) = self.chunks.next() {
-                self.buffer_seq.add(seqs.0);
-                self.buffer_data.add(values);
-                self.next()
-            } else {
-                if n_buffer == 0 {
-                    None
-                } else {
-                    let seqs = self
-                        .buffer_seq
-                        .take_all()
-                        .into_dimensionality::<Ix2>()
-                        .unwrap();
-                    let data = self.buffer_data.take_all();
-                    Some((Sequences(seqs), data))
-                }
-            }
-        } else {
-            let data = self.buffer_data.take(self.batch_size).unwrap();
-            let seqs = self
-                .buffer_seq
-                .take(self.batch_size)
-                .unwrap()
-                .into_dimensionality::<Ix2>()
-                .unwrap();
-            Some((Sequences(seqs), data))
-        }
     }
 }
 
@@ -782,7 +651,7 @@ impl GenomeDataLoaderIter {
         py: Python<'a>,
     ) -> Option<Bound<'a, pyo3::types::PyTuple>> {
         let (seq, values) = slf.next()?;
-        let values = PyArrayDyn::from_owned_array(py, values);
+        let values = PyArray3::from_owned_array(py, values);
         let result = if slf.seq_as_string {
             (seq.into_strings(), values).into_pyobject(py).unwrap()
         } else {
@@ -1135,7 +1004,7 @@ impl GenomeDataLoaderMap {
 pub struct MultiDataLoaderIter(IndexMap<String, GenomeDataLoaderIter>);
 
 impl Iterator for MultiDataLoaderIter {
-    type Item = (Sequences, IndexMap<String, ArrayD<f32>>);
+    type Item = (Sequences, IndexMap<String, Array3<f32>>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut seqs = None;
@@ -1171,7 +1040,7 @@ impl MultiDataLoaderIter {
 
         let values = values
             .into_iter()
-            .map(|(tag, v)| (tag, PyArrayDyn::from_owned_array(py, v)))
+            .map(|(tag, v)| (tag, PyArray3::from_owned_array(py, v)))
             .collect::<IndexMap<_, _>>();
 
         let result = if slf.0[0].seq_as_string {
@@ -1280,7 +1149,7 @@ pub struct MultiGenomeIter {
 }
 
 impl Iterator for MultiGenomeIter {
-    type Item = (Sequences, IndexMap<String, ArrayD<f32>>);
+    type Item = (Sequences, IndexMap<String, Array3<f32>>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.iters.is_empty() {
@@ -1311,7 +1180,7 @@ impl MultiGenomeIter {
         let (seq, values) = slf.next()?;
         let values = values
             .into_iter()
-            .map(|(tag, v)| (tag, PyArrayDyn::from_owned_array(py, v)))
+            .map(|(tag, v)| (tag, PyArray3::from_owned_array(py, v)))
             .collect::<IndexMap<_, _>>();
 
         let result = if slf.iters[0].0[0].seq_as_string {

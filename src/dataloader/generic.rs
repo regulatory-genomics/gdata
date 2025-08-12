@@ -1,7 +1,6 @@
-use ndarray::{Array, ArrayBase, ArrayD, Dimension};
+use ndarray::{Array, ArrayD, Dimension};
 use numpy::{PyArrayDyn, PyArrayMethods};
 use pyo3::{prelude::*, types::PyType};
-use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
 use rayon::str;
 use serde::Serialize;
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -122,13 +121,16 @@ impl DataLoader {
 
     Parameters
     ----------
-    data : Iterator
+    data : Iterator[tuple[np.ndarray, np.ndarray]]
         An iterator that yields data items to be serialized and stored.
     data_file : str
         The path to the file where the serialized data will be stored.
 */
 #[pyclass]
-pub(crate) struct PyArrayDataLoader(DataLoader);
+pub(crate) struct PyArrayDataLoader {
+    inner: DataLoader,
+    batch_size: usize,
+}
 
 struct PyArrayWrapper<'py, T>(Bound<'py, PyArrayDyn<T>>);
 
@@ -146,20 +148,23 @@ impl<T: Serialize + numpy::Element> Serialize for PyArrayWrapper<'_, T> {
 impl PyArrayDataLoader {
     #[new]
     #[pyo3(
-        signature = (data, data_file),
-        text_signature = "($self, data, data_file)"
+        signature = (data, data_file, batch_size=32),
+        text_signature = "($self, data, data_file, batch_size=32)"
     )]
-    pub fn new(data: Bound<'_, PyAny>, data_file: PathBuf) -> Result<Self> {
+    pub fn new(data: Bound<'_, PyAny>, data_file: PathBuf, batch_size: usize) -> Result<Self> {
         let iter = data.try_iter()?.map(|item| {
-            let arr: Bound<'_, PyArrayDyn<f32>>= item.unwrap().extract().unwrap();
-            PyArrayWrapper(arr)
+            let (arr1, arr2): (Bound<'_, PyArrayDyn<f32>>, Bound<'_, PyArrayDyn<f32>>) = item.unwrap().extract().unwrap();
+            (PyArrayWrapper(arr1), PyArrayWrapper(arr2))
         });
         let dataloader = DataLoader::new(
             iter,
             //PrefethIterator::new(iter, 32),
             data_file,
         )?;
-        Ok(Self(dataloader))
+        Ok(Self {
+            inner: dataloader,
+            batch_size,
+        })
     }
 
     /** Open an existing DataLoader from a data file.
@@ -176,19 +181,22 @@ impl PyArrayDataLoader {
     */
     #[classmethod]
     #[pyo3(
-        signature = (data_file),
-        text_signature = "(data_file)"
+        signature = (data_file, batch_size=32),
+        text_signature = "(data_file, batch_size=32)"
     )]
-    fn open(_cls: &Bound<'_, PyType>, data_file: PathBuf) -> Result<Self> {
-        Ok(Self(DataLoader::open(data_file)?))
+    fn open(_cls: &Bound<'_, PyType>, data_file: PathBuf, batch_size: usize) -> Result<Self> {
+        Ok(Self {
+            inner: DataLoader::open(data_file)?,
+            batch_size,
+        })
     }
 
     fn __len__(&self) -> usize {
-        self.0.len()
+        self.inner.len()
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyDataLoaderIter {
-        let iter = slf.0.iter();
+        let iter = ReBatch::new(slf.inner.iter(), slf.batch_size);
         PyDataLoaderIter(PrefethIterator::new(iter, 32))
     }
 }
@@ -199,35 +207,6 @@ struct DataLoaderIter<T> {
     pos: usize,
     _phantom: std::marker::PhantomData<T>,
 }
-
-/*
-impl<T: serde::de::DeserializeOwned + Send> DataLoaderIter<T> {
-    fn load_buffer(&mut self) -> Result<usize> {
-        let mut buffers = Vec::new();
-        for _ in 0..self.buffer_size {
-            if self.pos >= self.sizes.len() {
-                break;
-            }
-
-            let size = self.sizes[self.pos];
-            let mut buffer = vec![0; size];
-            self.file.read_exact(&mut buffer).context("Failed to read data from file")?;
-
-            buffers.push(buffer);
-            self.pos += 1;
-        }
-        let items: Vec<T> = buffers.into_par_iter()
-            .map(|buffer| {
-                let decompressed = decompress_data_zst(&buffer);
-                bincode::serde::decode_from_slice(&decompressed, bincode::config::standard()).unwrap().0
-            })
-            .collect();
-        let n = items.len();
-        self.buffer.extend(items);
-        Ok(n)
-    }
-}
-    */
 
 impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
     type Item = T;
@@ -306,6 +285,17 @@ pub(crate) struct ReBatch<T1, T2, D1, D2, I> {
     input_buffer: ArrayBuffer<T1, D1>,
     target_buffer: ArrayBuffer<T2, D2>,
     chunks: I,
+}
+
+impl<T1: Clone, T2: Clone, D1: Dimension, D2: Dimension, I> ReBatch<T1, T2, D1, D2, I> {
+    pub fn new(iter: I, batch_size: usize) -> Self {
+        Self {
+            batch_size,
+            input_buffer: ArrayBuffer::new(),
+            target_buffer: ArrayBuffer::new(),
+            chunks: iter,
+        }
+    }
 }
 
 impl<T1, T2, D1, D2, I> Iterator for ReBatch<T1, T2, D1, D2, I>
