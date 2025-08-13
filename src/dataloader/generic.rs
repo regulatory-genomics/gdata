@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 /// A generic data loader that serializes data items to a file and allows iteration over them.
 pub struct DataLoader {
     path: PathBuf,
-    sizes: Vec<usize>,
+    offset_and_size: Vec<(usize, usize)>,
 }
 
 impl DataLoader {
@@ -35,7 +35,7 @@ impl DataLoader {
             )
         })?;
 
-        let sizes = data
+        let sizes: Vec<usize> = data
             .map(|item| {
                 let mut buffer =
                     bincode::serde::encode_to_vec(item, bincode::config::standard()).unwrap();
@@ -55,7 +55,14 @@ impl DataLoader {
 
         Ok(Self {
             path: data_file.as_ref().to_path_buf(),
-            sizes,
+            offset_and_size: sizes
+                .into_iter()
+                .scan(0, |offset, size| {
+                    let current_offset = *offset;
+                    *offset += size;
+                    Some((current_offset, size))
+                })
+                .collect(),
         })
     }
 
@@ -95,23 +102,30 @@ impl DataLoader {
         let mut index_data = vec![0u8; n_bytes];
         file.read_exact(&mut index_data)?;
 
-        let sizes = bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
-
+        let sizes: Vec<usize> =
+            bincode::decode_from_slice(&index_data, bincode::config::standard())?.0;
         Ok(Self {
             path: data_file.as_ref().to_path_buf(),
-            sizes,
+            offset_and_size: sizes
+                .into_iter()
+                .scan(0, |offset, size| {
+                    let current_offset = *offset;
+                    *offset += size;
+                    Some((current_offset, size))
+                })
+                .collect(),
         })
     }
 
     pub fn len(&self) -> usize {
-        self.sizes.len()
+        self.offset_and_size.len()
     }
 
     fn iter<T>(&self) -> DataLoaderIter<T> {
         let file = File::open(&self.path).expect("Failed to open data file");
         DataLoaderIter {
             file,
-            sizes: self.sizes.clone(),
+            offset_and_size: self.offset_and_size.clone(),
             pos: 0,
             buffer: VecDeque::new(),
             num_workers: 16, // Default number of workers, can be adjusted
@@ -155,12 +169,12 @@ impl PyArrayDataLoader {
     )]
     pub fn new(data: Bound<'_, PyAny>, data_file: PathBuf, batch_size: usize) -> Result<Self> {
         let iter = data.try_iter()?.map(|item| {
-            let (arr1, arr2): (Bound<'_, PyArrayDyn<f32>>, Bound<'_, PyArrayDyn<f32>>) = item.unwrap().extract().unwrap();
+            let (arr1, arr2): (Bound<'_, PyArrayDyn<f32>>, Bound<'_, PyArrayDyn<f32>>) =
+                item.unwrap().extract().unwrap();
             (PyArrayWrapper(arr1), PyArrayWrapper(arr2))
         });
         let dataloader = DataLoader::new(
-            iter,
-            //PrefethIterator::new(iter, 32),
+            iter, //PrefethIterator::new(iter, 32),
             data_file,
         )?;
         Ok(Self {
@@ -210,42 +224,51 @@ impl PyArrayDataLoader {
 
 struct DataLoaderIter<T> {
     file: File,
-    sizes: Vec<usize>,
+    offset_and_size: Vec<(usize, usize)>,
     pos: usize,
     buffer: VecDeque<T>,
     num_workers: usize,
 }
 
-impl<T: serde::de::DeserializeOwned + Send> DataLoaderIter<T> {
+impl<T: serde::de::DeserializeOwned + Send + Sync> DataLoaderIter<T> {
     fn load(&mut self) {
-        if self.pos >= self.sizes.len() {
-            return
+        if self.pos >= self.offset_and_size.len() {
+            return;
         }
 
-        let mut results = Vec::new();
-        for _ in 0..self.num_workers {
-            if self.pos >= self.sizes.len() {
-                break;
-            }
-            let size = self.sizes[self.pos];
-            let mut b = vec![0; size];
-            self.file.read_exact(&mut b).unwrap();
-            results.push(b);
-            self.pos += 1;
-        }
+        let buffer_mutex = Arc::new(Mutex::new(&mut self.buffer));
 
-        let items = results.into_par_iter().map(|b| {
-            let b = decompress_data_zst(&b);
-            let item: T = bincode::serde::decode_from_slice(&b, bincode::config::standard())
-                .unwrap()
+        self.offset_and_size[self.pos..self.pos + self.num_workers]
+            .into_par_iter()
+            .for_each(|&(offset, size)| {
+                let mut file = self.file.try_clone().expect("Failed to clone file handle");
+                // Seek to the correct position in the file
+                file
+                    .seek(std::io::SeekFrom::Start(offset as u64))
+                    .expect("seek failed");
+
+                // Read the data into a buffer
+                let mut buffer = vec![0; size];
+                file.read_exact(&mut buffer).expect("read failed");
+
+                let decompressed_data = decompress_data_zst(&buffer);
+                let item: T = bincode::serde::decode_from_slice(
+                    &decompressed_data,
+                    bincode::config::standard(),
+                )
+                .expect("deserialization failed")
                 .0;
-            item
-        }).collect::<Vec<_>>();
-        self.buffer.extend(items);
+                buffer_mutex
+                    .lock()
+                    .expect("Failed to lock buffer")
+                    .push_back(item);
+            });
+
+        self.pos += self.num_workers;
     }
 }
 
-impl<T: serde::de::DeserializeOwned + Send> Iterator for DataLoaderIter<T> {
+impl<T: serde::de::DeserializeOwned + Send + Sync> Iterator for DataLoaderIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -346,19 +369,14 @@ where
                 if n_buffer == 0 {
                     None
                 } else {
-                    let inputs = self
-                        .input_buffer
-                        .take_all();
+                    let inputs = self.input_buffer.take_all();
                     let targets = self.target_buffer.take_all();
                     Some((inputs, targets))
                 }
             }
         } else {
             let inputs = self.input_buffer.take(self.batch_size).unwrap();
-            let targets = self
-                .target_buffer
-                .take(self.batch_size)
-                .unwrap();
+            let targets = self.target_buffer.take(self.batch_size).unwrap();
             Some((inputs, targets))
         }
     }
