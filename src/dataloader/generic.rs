@@ -1,9 +1,10 @@
 use ndarray::{Array, ArrayD, Dimension};
 use numpy::{PyArrayDyn, PyArrayMethods};
 use pyo3::{prelude::*, types::PyType};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rayon::str;
 use serde::Serialize;
+use std::os::unix::fs::FileExt;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -121,15 +122,45 @@ impl DataLoader {
         self.offset_and_size.len()
     }
 
-    fn iter<T>(&self) -> DataLoaderIter<T> {
+    fn iter<T: serde::de::DeserializeOwned + Send>(&self) -> ParallelLoader<DataLoaderIter<T>, T> {
         let file = File::open(&self.path).expect("Failed to open data file");
-        DataLoaderIter {
-            file,
-            offset_and_size: self.offset_and_size.clone(),
-            pos: 0,
-            buffer: VecDeque::new(),
-            num_workers: 16, // Default number of workers, can be adjusted
-        }
+        let num_works = 16;
+        let iters = split_into_n(&self.offset_and_size, num_works)
+            .into_iter()
+            .map(|chunk| DataLoaderIter {
+                file: file.try_clone().expect("Failed to clone file handle"),
+                offset_and_size: chunk,
+                pos: 0,
+                _phantom: std::marker::PhantomData,
+            })
+            .collect::<Vec<_>>();
+        ParallelLoader::new(iters)
+    }
+}
+
+struct DataLoaderIter<T> {
+    file: File,
+    offset_and_size: Vec<(usize, usize)>,
+    pos: usize,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (offset, size) = self.offset_and_size[self.pos];
+        let mut buffer = vec![0; size];
+        self.file
+            .read_exact_at(&mut buffer, offset as u64)
+            .expect("read failed");
+        let decompressed_data = decompress_data_zst(&buffer);
+        let item: T =
+            bincode::serde::decode_from_slice(&decompressed_data, bincode::config::standard())
+                .expect("deserialization failed")
+                .0;
+        self.pos += 1;
+        Some(item)
     }
 }
 
@@ -222,63 +253,6 @@ impl PyArrayDataLoader {
     }
 }
 
-struct DataLoaderIter<T> {
-    file: File,
-    offset_and_size: Vec<(usize, usize)>,
-    pos: usize,
-    buffer: VecDeque<T>,
-    num_workers: usize,
-}
-
-impl<T: serde::de::DeserializeOwned + Send + Sync> DataLoaderIter<T> {
-    fn load(&mut self) {
-        if self.pos >= self.offset_and_size.len() {
-            return;
-        }
-
-        let buffer_mutex = Arc::new(Mutex::new(&mut self.buffer));
-
-        self.offset_and_size[self.pos..self.pos + self.num_workers]
-            .into_par_iter()
-            .for_each(|&(offset, size)| {
-                let mut file = self.file.try_clone().expect("Failed to clone file handle");
-                // Seek to the correct position in the file
-                file
-                    .seek(std::io::SeekFrom::Start(offset as u64))
-                    .expect("seek failed");
-
-                // Read the data into a buffer
-                let mut buffer = vec![0; size];
-                file.read_exact(&mut buffer).expect("read failed");
-
-                let decompressed_data = decompress_data_zst(&buffer);
-                let item: T = bincode::serde::decode_from_slice(
-                    &decompressed_data,
-                    bincode::config::standard(),
-                )
-                .expect("deserialization failed")
-                .0;
-                buffer_mutex
-                    .lock()
-                    .expect("Failed to lock buffer")
-                    .push_back(item);
-            });
-
-        self.pos += self.num_workers;
-    }
-}
-
-impl<T: serde::de::DeserializeOwned + Send + Sync> Iterator for DataLoaderIter<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.buffer.pop_front().or_else(|| {
-            self.load();
-            self.buffer.pop_front()
-        })
-    }
-}
-
 #[pyclass]
 struct PyDataLoaderIter(PrefethIterator<(ArrayD<f32>, ArrayD<f32>)>);
 
@@ -297,6 +271,49 @@ impl PyDataLoaderIter {
             PyArrayDyn::from_owned_array(py, input),
             PyArrayDyn::from_owned_array(py, target),
         ))
+    }
+}
+
+pub struct ParallelLoader<L, T> {
+    loaders: Vec<L>,
+    buffer: VecDeque<T>,
+}
+
+impl<L, T> Iterator for ParallelLoader<L, T>
+where
+    T: Send,
+    L: Iterator<Item = T> + Send,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.load();
+        self.buffer.pop_front()
+    }
+}
+
+impl<L, T> ParallelLoader<L, T>
+where
+    T: Send,
+    L: Iterator<Item = T> + Send,
+    //for<'a> &'a Vec<L>: IntoParallelIterator<Item = L>,
+{
+    pub fn new(loaders: Vec<L>) -> Self {
+        Self {
+            loaders,
+            buffer: VecDeque::new(),
+        }
+    }
+
+    /// Fill the internal buffer if it is empty.
+    pub fn load(&mut self) {
+        if self.buffer.is_empty() {
+            self.buffer = self
+                .loaders
+                .par_iter_mut()
+                .flat_map(|loader| loader.next())
+                .collect();
+        }
     }
 }
 
@@ -496,4 +513,12 @@ pub(crate) fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     let mut decompressed_data = Vec::new();
     decoder.read_to_end(&mut decompressed_data).unwrap();
     decompressed_data
+}
+
+fn split_into_n<T: Clone>(values: &[T], n: usize) -> Vec<Vec<T>> {
+    let mut result = vec![Vec::new(); n];
+    values.iter().enumerate().for_each(|(i, v)| {
+        result[i % n].push(v.clone());
+    });
+    result
 }
