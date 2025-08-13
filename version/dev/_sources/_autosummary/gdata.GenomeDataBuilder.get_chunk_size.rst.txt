@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.get\_chunk\_size
+========================================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.get_chunk_size

@@ -1,0 +1,6 @@
+gdata.utils.Gene.chrom
+======================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.chrom

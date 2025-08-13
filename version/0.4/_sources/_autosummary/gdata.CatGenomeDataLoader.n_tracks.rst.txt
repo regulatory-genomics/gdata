@@ -1,0 +1,6 @@
+gdata.CatGenomeDataLoader.n\_tracks
+===================================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: CatGenomeDataLoader.n_tracks

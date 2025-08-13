@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.copy
+===========================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoader.copy

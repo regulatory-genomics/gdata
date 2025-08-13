@@ -1,0 +1,6 @@
+gdata.W5Z.close
+===============
+
+.. currentmodule:: gdata
+
+.. automethod:: W5Z.close

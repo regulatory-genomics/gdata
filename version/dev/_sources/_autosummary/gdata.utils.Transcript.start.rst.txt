@@ -1,0 +1,6 @@
+gdata.utils.Transcript.start
+============================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.start
