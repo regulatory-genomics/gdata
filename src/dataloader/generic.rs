@@ -149,10 +149,10 @@ impl<T: serde::de::DeserializeOwned> Iterator for DataLoaderIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (offset, size) = self.offset_and_size[self.pos];
-        let mut buffer = vec![0; size];
+        let (offset, size) = self.offset_and_size.get(self.pos)?;
+        let mut buffer = vec![0; *size];
         self.file
-            .read_exact_at(&mut buffer, offset as u64)
+            .read_exact_at(&mut buffer, *offset as u64)
             .expect("read failed");
         let decompressed_data = decompress_data_zst(&buffer);
         let item: T =
@@ -515,7 +515,7 @@ pub(crate) fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     decompressed_data
 }
 
-fn split_into_n<T: Clone>(values: &[T], n: usize) -> Vec<Vec<T>> {
+pub(crate) fn split_into_n<T: Clone>(values: &[T], n: usize) -> Vec<Vec<T>> {
     let mut result = vec![Vec::new(); n];
     values.iter().enumerate().for_each(|(i, v)| {
         result[i % n].push(v.clone());

@@ -72,7 +72,7 @@ impl W5Z {
         Ok(Self { inner })
     }
 
-    fn keys(&self) -> Result<Vec<String>> {
+    pub fn keys(&self) -> Result<Vec<String>> {
         let group = self.inner.group("/")?;
         let keys = group
             .datasets()?

@@ -1,22 +1,18 @@
 use anyhow::{ensure, Context, Result};
 use bed_utils::bed::GenomicRange;
+use half::bf16;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use ndarray::{Array1, Array3};
-use numpy::{PyArray1, PyArray2, PyArray3};
+use ndarray::{Array2, Array3, Axis};
+use numpy::{PyArray2, PyArray3};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::dataloader::generic::ReBatch;
-
+use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataStoreReadOptions};
 use super::super::generic::PrefethIterator;
-use super::builder::GenomeDataBuilder;
-use super::chunk::Sequences;
-use super::index::ReadChunkOptions;
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -64,7 +60,7 @@ use super::index::ReadChunkOptions;
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
         such as for visualization or text-based analysis.
-    prefetch : int
+    n_jobs: int
         The number of chunks to prefetch for efficient data loading.
         The chunks here refer to the data chunks stored in the GenomeDataBuilder.
         This allows for asynchronous loading of data, improving performance during training or inference.
@@ -92,17 +88,13 @@ use super::index::ReadChunkOptions;
 #[pyclass]
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
-    builder: GenomeDataBuilder,
-    resolution: Option<u64>,
-    window_size: Option<u64>,
+    data_store: DataStore,
+    segments: Vec<GenomicRange>,
     #[pyo3(get, set)]
     batch_size: usize,
-    trim_target: Option<usize>,
-    scale: Option<f32>,
-    clamp_max: Option<f32>,
     shuffle: bool,
     seq_as_string: bool,
-    prefetch: usize,
+    n_jobs: usize,
     rng: ChaCha12Rng,
 }
 
@@ -110,18 +102,20 @@ impl std::fmt::Display for GenomeDataLoader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         writeln!(
             f,
-            "GenomeDataLoader at '{}' with {} segments x {} tracks:",
-            self.builder.location.display(),
-            self.builder.seq_index.len(),
-            self.builder.tracks().unwrap().len()
+            "GenomeDataLoader ({} segments x {} tracks):",
+            self.segments.len(),
+            self.tracks().len()
         )?;
         write!(
             f,
-            "    window_size = {}, resolution = {}, batch_size = {}, trim_target = {}",
+            "    window_size = {}, resolution = {}, batch_size = {}, target_length = {}",
             self.window_size(),
-            self.builder.resolution,
+            self.resolution(),
             self.batch_size,
-            self.trim_target.unwrap_or(0),
+            self.data_store
+                .read_opts
+                .value_length
+                .unwrap_or(self.data_store.sequence_length)
         )?;
         Ok(())
     }
@@ -129,114 +123,39 @@ impl std::fmt::Display for GenomeDataLoader {
 
 impl GenomeDataLoader {
     pub fn len(&self) -> usize {
-        let mut n = self.builder.seq_index.len();
-        let multiply_by =
-            self.builder.window_size / self.window_size.unwrap_or(self.builder.window_size);
-        n *= multiply_by as usize;
+        let mut n = self.segments.len();
+        if let Some(split_size) = self.data_store.read_opts.split_size {
+            n *= (self.data_store.sequence_length / split_size) as usize
+        }
         n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
     }
 
-    pub fn set_trim_target(&mut self, trim_target: usize) {
-        if trim_target >= (self.window_size() / 2) as usize {
-            panic!("Trim target must be less than half of the window size");
-        } else if trim_target % self.builder.resolution as usize != 0 {
-            panic!(
-                "Trim target must be a multiple of resolution ({})",
-                self.builder.resolution
-            );
-        }
-        self.trim_target = Some(trim_target);
+    pub fn set_target_length(&mut self, target_length: u32) -> Result<()> {
+        self.data_store.set_value_length(target_length)
+    }
+
+    pub fn set_window_size(&mut self, window_size: u32) -> Result<()> {
+        self.data_store.set_split_size(window_size)
     }
 
     pub fn intersection(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
-        let mut new_loader = self.clone();
-        let builder = &mut new_loader.builder;
-        builder.seq_index = builder.seq_index.intersection(regions);
-        let chromosomes = builder.seq_index.chromosomes().collect::<HashSet<_>>();
-        builder
-            .chrom_sizes
-            .retain(|chrom, _| chromosomes.contains(chrom));
-        new_loader
+        todo!()
     }
 
     pub fn difference(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
-        let mut new_loader = self.clone();
-        let builder = &mut new_loader.builder;
-        builder.seq_index = builder.seq_index.difference(regions);
-        let chromosomes = builder.seq_index.chromosomes().collect::<HashSet<_>>();
-        builder
-            .chrom_sizes
-            .retain(|chrom, _| chromosomes.contains(chrom));
-        new_loader
-    }
-
-    fn get_read_chunk_opts(&self) -> ReadChunkOptions {
-        let resolution = self.resolution();
-
-        let aggregation = if resolution != self.builder.resolution {
-            if resolution % self.builder.resolution != 0 {
-                panic!(
-                    "Loader's resolution ({}) must be a multiple of the dataset's resolution ({})",
-                    resolution, self.builder.resolution
-                );
-            }
-            Some((resolution / self.builder.resolution) as usize)
-        } else {
-            None
-        };
-
-        let split_data = if let Some(s) = self.window_size {
-            let builder_window_size = self.builder.window_size;
-            assert!(
-                s <= builder_window_size,
-                "Loader's window size is larger than the dataset's window size ({})",
-                builder_window_size,
-            );
-            assert!(
-                s % resolution == 0,
-                "Loader's window size must be a multiple of the dataset's resolution ({})",
-                resolution,
-            );
-
-            if s == builder_window_size {
-                None
-            } else {
-                Some((s as usize, (s / resolution) as usize))
-            }
-        } else {
-            None
-        };
-        let opts = ReadChunkOptions {
-            split_data,
-            trim_target: self.trim_target.map(|t| t / resolution as usize),
-            aggregation,
-            scale: self.scale,
-            clamp_max: self.clamp_max,
-            write: false,
-        };
-        opts
+        todo!()
     }
 
     pub fn iter(&mut self) -> GenomeDataLoaderIter {
-        let opts = self.get_read_chunk_opts();
-        let shuffle = if self.shuffle {
-            Some(&mut self.rng)
-        } else {
-            None
-        };
-        let chunks = self
-            .builder
-            .seq_index
-            .iter_chunk_data(opts, shuffle, self.prefetch)
-            .map(|(s, v)| (s.0, v));
-        let chunks = PrefethIterator::new(chunks, self.prefetch);
-        let chunks_batched = ReBatch::new(chunks, self.batch_size).map(|(s, v)| (Sequences(s), v));
-        let chunks_batched = PrefethIterator::new(
-            chunks_batched,
-                self.prefetch * self.builder.get_chunk_size() / self.batch_size,
+        let iter = PrefethIterator::new(
+            self.data_store.par_iter(self.batch_size, self.n_jobs),
+            self.n_jobs * 2,
         );
 
-        GenomeDataLoaderIter { iter: chunks_batched, seq_as_string: self.seq_as_string }
+        GenomeDataLoaderIter {
+            iter,
+            seq_as_string: self.seq_as_string,
+        }
     }
 }
 
@@ -245,59 +164,49 @@ impl GenomeDataLoader {
     #[new]
     #[pyo3(
         signature = (location, *,
-            batch_size=8, resolution=None, trim_target=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=false, seq_as_string=false, prefetch=4,
+            batch_size=8, resolution=None, target_length=None, scale=None, clamp_max=None,
+            window_size=None, shuffle=false, seq_as_string=false, n_jobs=8,
             random_seed=2025,
         ),
         text_signature = "($self, location, *,
-            batch_size=8, resolution=None, trim_target=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=False, seq_as_string=False, prefetch=4,
+            batch_size=8, resolution=None, target_length=None, scale=None, clamp_max=None,
+            window_size=None, shuffle=False, seq_as_string=False, n_jobs=8,
             random_seed=2025)"
     )]
     pub fn new(
         location: PathBuf,
         batch_size: usize,
-        resolution: Option<u64>,
-        trim_target: Option<usize>,
+        resolution: Option<u32>,
+        target_length: Option<u32>,
         scale: Option<f32>,
         clamp_max: Option<f32>,
-        window_size: Option<u64>,
+        window_size: Option<u32>,
         shuffle: bool,
         seq_as_string: bool,
-        prefetch: usize,
+        n_jobs: usize,
         random_seed: u64,
     ) -> Result<Self> {
-        let builder = GenomeDataBuilder::open(location)?;
-        if let Some(window_size) = window_size {
-            ensure!(
-                builder.window_size % window_size == 0,
-                "dataset's window size ({}) must be a multiple of the loader's window size",
-                builder.window_size,
-            );
-            ensure!(
-                window_size % builder.resolution == 0,
-                "Loader's window size must be a multiple of the dataset's resolution ({})",
-                builder.resolution
-            );
-        }
-
-        let mut loader = Self {
-            builder,
-            window_size,
-            batch_size,
-            resolution,
-            trim_target: None,
-            scale,
-            clamp_max,
-            shuffle,
-            seq_as_string,
-            prefetch,
-            rng: ChaCha12Rng::seed_from_u64(random_seed),
+        let store_opts = DataStoreReadOptions {
+            shift: 0,
+            value_length: target_length,
+            split_size: window_size,
+            read_resolution: resolution,
+            scale_value: scale.map(|x| bf16::from_f32(x)),
+            clamp_value_max: clamp_max.map(|x| bf16::from_f32(x)),
         };
 
-        if let Some(t) = trim_target {
-            loader.set_trim_target(t);
-        }
+        let data_store = DataStore::open(location, store_opts)?;
+        let segments = data_store.index.keys().cloned().collect();
+
+        let loader = Self {
+            data_store,
+            segments,
+            batch_size,
+            shuffle,
+            seq_as_string,
+            n_jobs,
+            rng: ChaCha12Rng::seed_from_u64(random_seed),
+        };
 
         Ok(loader)
     }
@@ -313,8 +222,12 @@ impl GenomeDataLoader {
            A sorted list of keys as strings.
     */
     #[getter]
-    fn tracks(&self) -> Result<Vec<String>> {
-        self.builder.tracks()
+    pub fn tracks(&self) -> Vec<String> {
+        self.data_store
+            .data_keys
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
     }
 
     /** Returns the segments of the genome as a vector of strings.
@@ -325,37 +238,47 @@ impl GenomeDataLoader {
            A list of segment strings representing genomic ranges.
     */
     #[getter]
-    fn segments(&self) -> Vec<String> {
-        self.builder
-            .seq_index
-            .keys()
-            .map(|x| x.pretty_show())
-            .collect()
+    pub fn segments(&self) -> Vec<String> {
+        self.segments.iter().map(|x| x.pretty_show()).collect()
     }
 
-    #[getter]
-    fn window_size(&self) -> u64 {
-        self.window_size.unwrap_or(self.builder.window_size)
-    }
+    /** The length of input sequences in base pairs.
 
-    #[getter]
-    fn resolution(&self) -> u64 {
-        self.resolution.unwrap_or(self.builder.resolution)
-    }
+       This method returns the length of the input sequences in base pairs.
+       It is determined by the `split_size` option in the read options of the data store.
+       If `split_size` is not set, it defaults to the sequence length of the data store.
 
-    /** Returns the sequence indexer for accessing genomic sequences.
-
-        This method provides an indexer that allows access to the genomic sequences
-        associated with the dataset. It can be used to retrieve sequences by their keys.
-
-        Returns
-        -------
-        _SeqIndexer
-            An indexer for accessing genomic sequences.
+       Returns
+       -------
+       int
+           The length of input sequences in base pairs.
     */
     #[getter]
-    fn seq(slf: PyRef<'_, Self>) -> SeqIndexer {
-        SeqIndexer(slf.into())
+    fn window_size(&self) -> u32 {
+        self.data_store
+            .read_opts
+            .split_size
+            .unwrap_or(self.data_store.sequence_length)
+    }
+
+    /** The length of the target vector in base pairs.
+
+       Returns
+       -------
+       int
+           The length of the target vector in base pairs.
+    */
+    #[getter]
+    fn target_length(&self) -> u32 {
+        self.data_store
+            .read_opts
+            .value_length
+            .unwrap_or(self.window_size())
+    }
+
+    #[getter]
+    fn resolution(&self) -> u32 {
+        self.data_store.out_resolution
     }
 
     /** Returns the data indexer for accessing genomic data.
@@ -485,7 +408,7 @@ impl GenomeDataLoader {
         tracks: Bound<'_, PyAny>,
         savefig: Option<PathBuf>,
     ) -> Result<()> {
-        let trim = slf.trim_target.unwrap_or(0);
+        let trim = (slf.window_size() - slf.target_length()) / 2;
         let data_indexer = Self::data(slf);
         let key = (region, &tracks).into_pyobject(py)?.into_any();
         let signal_values = data_indexer.__getitem__(py, key)?;
@@ -628,15 +551,19 @@ else:
 
 #[pyclass]
 pub struct GenomeDataLoaderIter {
-    iter: PrefethIterator<(Sequences, Array3<f32>)>,
+    iter: PrefethIterator<(Array2<u8>, Array3<f32>)>,
     seq_as_string: bool,
 }
 
 impl Iterator for GenomeDataLoaderIter {
-    type Item = (Sequences, Array3<f32>);
+    type Item = (Array2<u8>, Array3<f32>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
+        let (mut seq, val) = self.iter.next()?;
+        if self.seq_as_string {
+            seq.mapv_inplace(|x| decode_nucleotide(x).unwrap());
+        }
+        Some((seq, val))
     }
 }
 
@@ -653,44 +580,13 @@ impl GenomeDataLoaderIter {
         let (seq, values) = slf.next()?;
         let values = PyArray3::from_owned_array(py, values);
         let result = if slf.seq_as_string {
-            (seq.into_strings(), values).into_pyobject(py).unwrap()
+            let seq = seq_to_string(&seq);
+            (seq, values).into_pyobject(py).unwrap()
         } else {
+            let seq = PyArray2::from_owned_array(py, seq);
             (seq, values).into_pyobject(py).unwrap()
         };
         Some(result)
-    }
-}
-
-#[pyclass]
-struct SeqIndexer(Py<GenomeDataLoader>);
-
-impl SeqIndexer {
-    fn get(&self, py: Python<'_>, key: &str) -> Result<Array1<u8>> {
-        let py_ref = self.0.borrow(py);
-        let (chunk, i) = py_ref
-            .builder
-            .seq_index
-            .get(&GenomicRange::from_str(key).unwrap())
-            .with_context(|| format!("Failed to get data chunk for key: {}", key))?;
-        let mut opts = py_ref.get_read_chunk_opts();
-        opts.split_data = None; // Do not split data
-        Ok(chunk.open(&opts)?.get_seq_at(*i)?)
-    }
-}
-
-#[pymethods]
-impl SeqIndexer {
-    fn __getitem__<'a>(
-        &'a self,
-        py: Python<'a>,
-        key: Bound<'a, PyAny>,
-    ) -> Result<Bound<'a, PyAny>> {
-        if let Ok(key) = key.extract::<String>() {
-            Ok(PyArray1::from_owned_array(py, self.get(py, &key)?).into_any())
-        } else {
-            let key: Vec<String> = key.extract()?;
-            todo!()
-        }
     }
 }
 
@@ -703,47 +599,33 @@ impl DataIndexer {
         &'a self,
         py: Python<'a>,
         key: Bound<'a, PyAny>,
-    ) -> Result<Bound<'a, PyArray2<f32>>> {
+    ) -> Result<(Vec<String>, Bound<'a, PyArray3<f32>>)> {
         let loader = self.0.borrow(py);
         let (seq_index, mut data_index): (Bound<'_, PyAny>, Bound<'_, PyAny>) = key.extract()?;
         if !data_index.is_instance_of::<pyo3::types::PyList>() {
             data_index = vec![data_index].into_pyobject(py)?.into_any();
         }
 
-        let (chunk, i) = if let Ok(chunk_idx) = seq_index.extract::<String>() {
-            loader
-                .builder
-                .seq_index
-                .get(&GenomicRange::from_str(&chunk_idx).unwrap())
-                .with_context(|| format!("Failed to get data chunk for key: {}", key))?
+        let (seq, val) = if let Ok(region) = seq_index.extract::<String>() {
+            let region = GenomicRange::from_str(&region).unwrap();
+            loader.data_store.read(&region).unwrap()
         } else {
-            let chunk_idx: usize = seq_index.extract()?;
-            loader
-                .builder
-                .seq_index
-                .0
-                .values()
-                .nth(chunk_idx)
-                .with_context(|| format!("Invalid chunk index: {}", chunk_idx))?
+            let idx: usize = seq_index.extract()?;
+            loader.data_store.read_at(idx).unwrap()
         };
 
-        let mut opts = loader.get_read_chunk_opts();
-        opts.split_data = None; // Do not split data
-        let mut chunk = chunk.open(&opts)?;
-
-        let arr = if let Ok(j_) = data_index.extract::<Vec<String>>() {
-            chunk.read_keys(&j_)?
+        let idx: Vec<usize> = if let Ok(j_) = data_index.extract::<Vec<String>>() {
+            j_.into_iter()
+                .map(|x| loader.data_store.data_keys.get_index_of(&x).unwrap())
+                .collect()
         } else {
-            chunk.read(&data_index.extract::<Vec<usize>>()?)?
+            data_index.extract()?
         };
 
-        let data = arr
-            .0
-            .axis_iter(ndarray::Axis(0))
-            .nth(*i)
-            .unwrap()
-            .mapv(|x| x.to_f32());
-        Ok(PyArray2::from_owned_array(py, data))
+        let val: Array3<bf16> = val.into();
+        let val = val.select(Axis(2), &idx).mapv(|x| x.to_f32());
+
+        Ok((seq_to_string(&seq.into()), PyArray3::from_owned_array(py, val)))
     }
 }
 
@@ -767,9 +649,9 @@ impl DataIndexer {
     batch_size : Optional[int]
         Optional parameter to specify the batch size for loading genomic sequences.
         If not provided, it defaults to the minimum batch size across all loaders.
-    trim_target: Optional[int]
-        Optional parameter to specify the trim target for all loaders.
-        If not provided, each loader will use its own trim target.
+    target_length: Optional[int]
+        Optional parameter to specify the target length for all loaders.
+        If not provided, each loader will use its own target length.
     window_size : Optional[int]
         Optional parameter to specify the window size for all loaders.
     seq_as_string : bool
@@ -817,15 +699,15 @@ impl GenomeDataLoaderMap {
     #[new]
     #[pyo3(
         signature = (
-            loaders, *, batch_size=None, trim_target=None, window_size=None, seq_as_string=false,
+            loaders, *, batch_size=None, target_length=None, window_size=None, seq_as_string=false,
         ),
-        text_signature = "($self, loaders, *, batch_size=None, trim_target=None, window_size=None, seq_as_string=False)"
+        text_signature = "($self, loaders, *, batch_size=None, target_length=None, window_size=None, seq_as_string=False)"
     )]
     pub fn new(
         mut loaders: IndexMap<String, GenomeDataLoader>,
         batch_size: Option<usize>,
-        trim_target: Option<usize>,
-        window_size: Option<u64>,
+        target_length: Option<u32>,
+        window_size: Option<u32>,
         seq_as_string: bool,
     ) -> Result<Self> {
         ensure!(
@@ -848,18 +730,18 @@ impl GenomeDataLoaderMap {
         loaders.values_mut().for_each(|loader| {
             loader.seq_as_string = seq_as_string;
             loader.batch_size = batch_size;
-            trim_target.map(|t| {
-                loader.set_trim_target(t);
+            target_length.map(|t| {
+                loader.set_target_length(t).unwrap();
             });
             window_size.map(|w| {
-                loader.window_size = Some(w);
+                loader.set_window_size(w).unwrap();
             });
         });
 
         ensure!(
             loaders
                 .values()
-                .map(|loader| loader.window_size)
+                .map(|loader| loader.window_size())
                 .all_equal(),
             "All genome data loaders must have the same window size",
         );
@@ -879,7 +761,7 @@ impl GenomeDataLoaderMap {
         self.0
             .iter()
             .map(|(k, v)| {
-                let n_tracks = v.builder.tracks().unwrap().len();
+                let n_tracks = v.tracks().len();
                 (k.clone(), n_tracks)
             })
             .collect()
@@ -894,12 +776,7 @@ impl GenomeDataLoaderMap {
     */
     #[getter]
     fn segments(&self) -> Vec<String> {
-        self.0[0]
-            .builder
-            .seq_index
-            .keys()
-            .map(|x| x.pretty_show())
-            .collect()
+        self.0[0].segments()
     }
 
     /** batch size of the dataloader.
@@ -1004,7 +881,7 @@ impl GenomeDataLoaderMap {
 pub struct MultiDataLoaderIter(IndexMap<String, GenomeDataLoaderIter>);
 
 impl Iterator for MultiDataLoaderIter {
-    type Item = (Sequences, IndexMap<String, Array3<f32>>);
+    type Item = (Array2<u8>, IndexMap<String, Array3<f32>>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut seqs = None;
@@ -1044,8 +921,10 @@ impl MultiDataLoaderIter {
             .collect::<IndexMap<_, _>>();
 
         let result = if slf.0[0].seq_as_string {
-            (seq.into_strings(), values).into_pyobject(py).unwrap()
+            let seq = seq_to_string(&seq);
+            (seq, values).into_pyobject(py).unwrap()
         } else {
+            let seq = PyArray2::from_owned_array(py, seq);
             (seq, values).into_pyobject(py).unwrap()
         };
         Some(result)
@@ -1149,7 +1028,7 @@ pub struct MultiGenomeIter {
 }
 
 impl Iterator for MultiGenomeIter {
-    type Item = (Sequences, IndexMap<String, Array3<f32>>);
+    type Item = (Array2<u8>, IndexMap<String, Array3<f32>>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.iters.is_empty() {
@@ -1184,13 +1063,16 @@ impl MultiGenomeIter {
             .collect::<IndexMap<_, _>>();
 
         let result = if slf.iters[0].0[0].seq_as_string {
-            (seq.into_strings(), values).into_pyobject(py).unwrap()
+            let seq = seq_to_string(&seq);
+            (seq, values).into_pyobject(py).unwrap()
         } else {
+            let seq = PyArray2::from_owned_array(py, seq);
             (seq, values).into_pyobject(py).unwrap()
         };
         Some(result)
     }
 }
+
 
 fn extract_string_list(str: Bound<'_, PyAny>) -> Result<Vec<String>> {
     if let Ok(s) = str.extract::<String>() {
@@ -1199,4 +1081,11 @@ fn extract_string_list(str: Bound<'_, PyAny>) -> Result<Vec<String>> {
         str.extract::<Vec<String>>()
             .with_context(|| "Failed to extract string list from PyAny")
     }
+}
+
+pub(crate) fn seq_to_string(seq: &Array2<u8>) -> Vec<String> {
+    seq.rows()
+        .into_iter()
+        .map(|row| String::from_utf8(row.to_vec()).unwrap())
+        .collect()
 }

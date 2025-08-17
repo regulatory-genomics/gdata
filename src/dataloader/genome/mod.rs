@@ -1,6 +1,5 @@
 mod builder;
-mod chunk;
-mod index;
+mod data_store;
 mod loader;
 
 pub use builder::GenomeDataBuilder;
@@ -13,7 +12,7 @@ mod tests {
     use ndarray::s;
 
     use super::*;
-    use crate::w5z::W5Z;
+    use crate::{dataloader::genome::loader::seq_to_string, w5z::W5Z};
     use rand::{
         distr::{Distribution, Uniform},
         Rng,
@@ -98,25 +97,26 @@ mod tests {
         chr1 + &chr2
     }
 
-    fn build_genome(path: PathBuf, window_size: u64, resolution: u64) -> (PathBuf, String) {
+    fn build_genome(path: PathBuf, window_size: u32, resolution: u32) -> (PathBuf, String) {
         let w5z1 = make_w5z(path.join("data1.w5z"));
         let w5z2 = make_w5z2(path.join("data2.w5z"));
         let fasta = make_fasta(path.join("genome.fa"));
-        let builder = GenomeDataBuilder::new(
-            path.join("builder"),
+        std::fs::create_dir_all(&path).unwrap();
+        let mut builder = GenomeDataBuilder::new(
+            path.join("gdata"),
             path.join("genome.fa"),
             window_size,
             None,
             None,
-            Some(4),
             resolution,
             None,
-            true,
+            None,
         )
         .unwrap();
         builder.add_file("data1", w5z1).unwrap();
         builder.add_file("data2", w5z2).unwrap();
-        (path.join("builder"), fasta)
+        builder.finish().unwrap();
+        (path.join("gdata"), fasta)
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod tests {
                 None,
                 None,
                 false,
-                false,
+                true,
                 1,
                 0,
             )
@@ -142,7 +142,7 @@ mod tests {
             let (seq, values): (String, Vec<_>) = loader
                 .iter()
                 .flat_map(|(s, v)| {
-                    s.into_strings()
+                    seq_to_string(&s)
                         .into_iter()
                         .zip(v.slice(s![.., .., 0]).to_owned().into_iter())
                 })
@@ -251,7 +251,7 @@ mod tests {
             None,
             None,
             false,
-            false,
+            true,
             1,
             0,
         )
@@ -272,7 +272,7 @@ mod tests {
             None,
             Some(16),
             false,
-            false,
+            true,
             1,
             0,
         )
@@ -287,7 +287,7 @@ mod tests {
                     "Expected 16 channels, got {}",
                     v.shape()[1]
                 );
-                seqs.extend(s.into_strings());
+                seqs.extend(seq_to_string(&s));
                 values.extend(v.slice(s![.., .., 1]).to_owned().into_iter());
             });
         values = values[0..truth.len()].to_vec();
@@ -305,7 +305,7 @@ mod tests {
             builder.clone(),
             7,
                 None,
-            Some(4),
+            Some(24),
             None,
             None,
             None,
@@ -354,12 +354,12 @@ mod tests {
             builder.clone(),
             7,
                 None,
-            Some(4),
+            Some(8),
             None,
             None,
             Some(16),
             false,
-            false,
+            true,
             1,
             0,
         )
@@ -369,7 +369,7 @@ mod tests {
         loader1
             .iter()
             .for_each(|(s, v)| {
-                seqs.extend(s.into_strings());
+                seqs.extend(seq_to_string(&s));
                 values1.extend(v.slice(s![.., .., 1]).to_owned().into_iter());
             });
 
@@ -382,7 +382,7 @@ mod tests {
             None,
             Some(16),
             false,
-            false,
+            true,
             1,
             0,
         )
@@ -409,7 +409,7 @@ mod tests {
                 builder,
                 7,
                     None,
-                Some(4),
+                Some(8),
                 None,
                 None,
                 Some(16),
@@ -434,7 +434,7 @@ mod tests {
                 builder,
                 7,
                     Some(4),
-                Some(4),
+                Some(8),
                 None,
                 None,
                 Some(16),
