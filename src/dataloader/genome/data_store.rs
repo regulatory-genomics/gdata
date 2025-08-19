@@ -7,10 +7,10 @@ use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, 
 use noodles::core::Position;
 use noodles::fasta::io::IndexedReader;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
-use std::ops::Deref;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -70,39 +70,30 @@ impl Into<Array2<u8>> for Sequence {
     }
 }
 
-#[derive(Debug, Decode, Encode, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Offset((u64, u64));
 
-#[derive(Debug, Clone)]
-pub struct DataStoreIndex(IndexMap<GenomicRange, Offset>);
-
-impl Deref for DataStoreIndex {
-    type Target = IndexMap<GenomicRange, Offset>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+#[derive(Debug, Decode, Encode)]
+pub struct StoreMetadata {
+    #[bincode(with_serde)]
+    segment_index: IndexMap<GenomicRange, Offset>,
+    #[bincode(with_serde)]
+    data_keys: IndexSet<String>,
+    sequence_length: u32,
+    resolution: u32,
+    padding: u32,
 }
 
-impl FromIterator<(GenomicRange, Offset)> for DataStoreIndex {
-    fn from_iter<I: IntoIterator<Item = (GenomicRange, Offset)>>(iter: I) -> Self {
-        DataStoreIndex(IndexMap::from_iter(iter))
-    }
-}
-
-impl DataStoreIndex {
-    pub fn encode(self, compression: u8) -> Result<Vec<u8>> {
-        let data: Vec<_> = self.0.into_iter().collect();
-        let data = bincode::encode_to_vec(data, bincode::config::standard())?;
-        let data = compress_data_zst(data, compression);
+impl StoreMetadata {
+    pub fn encode(self) -> Result<Vec<u8>> {
+        let data = bincode::encode_to_vec(self, bincode::config::standard())?;
+        let data = compress_data_zst(data, 9);
         Ok(data)
     }
 
     pub fn decode(buffer: &[u8]) -> Result<Self> {
         let mut data = decompress_data_zst(buffer);
-        let data: Vec<(GenomicRange, Offset)> =
-            bincode::decode_from_slice(&mut data, bincode::config::standard())?.0;
-        Ok(DataStoreIndex(IndexMap::from_iter(data)))
+        Ok(bincode::decode_from_slice(&mut data, bincode::config::standard())?.0)
     }
 }
 
@@ -132,11 +123,7 @@ impl Default for DataStoreReadOptions {
 #[derive(Debug)]
 struct InnerStore {
     file: std::fs::File,
-    index: DataStoreIndex,
-    data_keys: IndexSet<String>,
-    sequence_length: u32,
-    resolution: u32,
-    padding: u32,
+    metadata: StoreMetadata,
 }
 
 #[derive(Debug, Clone)]
@@ -150,60 +137,52 @@ pub struct DataStore {
 impl DataStore {
     pub fn open(path: impl AsRef<Path>, mut read_opts: DataStoreReadOptions) -> Result<Self> {
         let mut file = File::open(&path).context("Failed to open data store file")?;
-        let (index, data_keys, sequence_length, resolution, padding) =
-            read_index_from_file(&mut file)?;
+        let metadata = read_metadata(&mut file)?;
 
         let shift = read_opts.shift.abs() as u32;
         ensure!(
-            shift <= padding,
+            shift <= metadata.padding,
             "Shift must be less than or equal to padding"
         );
         ensure!(
-            shift % resolution == 0,
+            shift % metadata.resolution == 0,
             "Shift must be a multiple of resolution"
         );
 
         let mut aggregate_size = None;
-        let mut out_resolution = resolution;
+        let mut out_resolution = metadata.resolution;
         if let Some(read_resolution) = read_opts.read_resolution {
             ensure!(
-                read_resolution % resolution == 0,
+                read_resolution % metadata.resolution == 0,
                 "Read resolution must be a multiple of resolution"
             );
-            aggregate_size = Some(read_resolution / resolution);
+            aggregate_size = Some(read_resolution / metadata.resolution);
             out_resolution = read_resolution;
         }
 
         if let Some(v_len) = read_opts.value_length {
             ensure!(
-                v_len % resolution == 0,
+                v_len % metadata.resolution == 0,
                 "Value length must be a multiple of resolution"
             );
             ensure!(
-                v_len <= read_opts.split_size.unwrap_or(sequence_length),
+                v_len <= read_opts.split_size.unwrap_or(metadata.sequence_length),
                 "Value length must be less than or equal to sequence length"
             );
         }
 
         if let Some(s) = read_opts.split_size {
             ensure!(
-                s % resolution == 0,
+                s % metadata.resolution == 0,
                 "Split size must be a multiple of resolution"
             );
 
-            if s == sequence_length {
+            if s == metadata.sequence_length {
                 read_opts.split_size = None;
             }
         }
 
-        let inner = Arc::new(InnerStore {
-            file,
-            index,
-            data_keys,
-            sequence_length,
-            resolution,
-            padding,
-        });
+        let inner = Arc::new(InnerStore { file, metadata });
 
         Ok(Self {
             inner,
@@ -214,19 +193,27 @@ impl DataStore {
     }
 
     pub fn segments(&self) -> impl Iterator<Item = &GenomicRange> {
-        self.inner.index.keys()
+        self.inner.metadata.segment_index.keys()
     }
 
     pub fn data_keys(&self) -> &IndexSet<String> {
-        &self.inner.data_keys
+        &self.inner.metadata.data_keys
     }
 
     pub fn sequence_length(&self) -> u32 {
-        self.inner.sequence_length
+        self.inner.metadata.sequence_length
     }
 
     fn output_length(&self) -> u32 {
         self.read_opts.split_size.unwrap_or(self.sequence_length())
+    }
+
+    fn n_pad(&self) -> u32 {
+        self.inner.metadata.padding
+    }
+
+    fn resolution(&self) -> u32 {
+        self.inner.metadata.resolution
     }
 
     pub fn set_value_length(&mut self, value_length: u32) -> Result<()> {
@@ -258,7 +245,7 @@ impl DataStore {
     }
 
     pub fn read(&self, region: &GenomicRange) -> Option<(Sequence, Values)> {
-        let offset = self.inner.index.get(region)?;
+        let offset = self.inner.metadata.segment_index.get(region)?;
         let mut buffer = vec![0; offset.0 .1 as usize];
         self.inner
             .file
@@ -276,10 +263,10 @@ impl DataStore {
         let arr = arr.t().insert_axis(Axis(0));
 
         // Apply random shifting
-        let seq_start = (self.read_opts.shift + self.inner.padding as i32) as usize;
+        let seq_start = (self.read_opts.shift + self.n_pad() as i32) as usize;
         let seq_end = seq_start + self.sequence_length() as usize;
-        let arr_start = seq_start / self.inner.resolution as usize;
-        let arr_end = seq_end / self.inner.resolution as usize;
+        let arr_start = seq_start / self.resolution() as usize;
+        let arr_end = seq_end / self.resolution() as usize;
         let mut seq = seq.slice(s![.., seq_start..seq_end]);
         let mut arr = arr.slice(s![.., arr_start..arr_end, ..]).to_owned();
 
@@ -311,7 +298,7 @@ impl DataStore {
     }
 
     pub fn read_at(&self, i: usize) -> Option<(Sequence, Values)> {
-        let region = self.inner.index.get_index(i)?.0;
+        let region = self.inner.metadata.segment_index.get_index(i)?.0;
         self.read(region)
     }
 
@@ -320,7 +307,7 @@ impl DataStore {
         batch_size: usize,
         num_threads: usize,
     ) -> impl Iterator<Item = (Array2<u8>, Array3<f32>)> {
-        let segments = self.inner.index.keys().cloned().collect::<Vec<_>>();
+        let segments = self.inner.metadata.segment_index.keys().cloned().collect::<Vec<_>>();
         let iters = split_n_with_batch_size(&segments, num_threads, batch_size)
             .into_iter()
             .map(|chunk| {
@@ -577,7 +564,7 @@ impl DataStoreBuilder {
             )
         })?;
         let mut offset = 0;
-        let index = self
+        let segment_index = self
             .segments
             .iter()
             .map(|(range, mut file)| {
@@ -625,25 +612,22 @@ impl DataStoreBuilder {
                 offset += n_bytes;
                 Ok((range.clone(), o))
             })
-            .collect::<Result<DataStoreIndex>>()?;
+            .collect::<Result<IndexMap<_, _>>>()?;
 
-        let index_bytes = index.encode(9)?;
-        store.write_all(&index_bytes)?;
+        let metadata = StoreMetadata {
+            segment_index,
+            data_keys: self.data_keys.clone(),
+            sequence_length: self.sequence_length,
+            resolution: self.resolution,
+            padding: self.padding,
+        };
+        let metadata_byes = metadata.encode()?;
+        store.write_all(&metadata_byes)?;
+        let metadata_len = metadata_byes.len() as u32;
 
-        let data_key_bytes =
-            bincode::serde::encode_to_vec(&self.data_keys, bincode::config::standard())?;
-        let data_key_bytes = compress_data_zst(data_key_bytes, 9);
-        store.write_all(&data_key_bytes)?;
-
-        let index_len = index_bytes.len() as u32;
-        let data_key_len = data_key_bytes.len() as u32;
-        // 8 + 4 + 4 + 4 + 4 + 4 = 28 bytes for the index metadata
+        // 8 + 4 = 12 bytes for the index metadata
         store.write_all(&offset.to_le_bytes())?; // 8 bytes
-        store.write_all(&index_len.to_le_bytes())?; // 4 bytes
-        store.write_all(&data_key_len.to_le_bytes())?; // 4 bytes
-        store.write_all(self.sequence_length.to_le_bytes().as_ref())?; // 4 bytes
-        store.write_all(self.resolution.to_le_bytes().as_ref())?; // 4 bytes
-        store.write_all(self.padding.to_le_bytes().as_ref())?; // 4 bytes
+        store.write_all(&metadata_len.to_le_bytes())?; // 4 bytes
 
         self.clear()
     }
@@ -712,42 +696,20 @@ pub(crate) fn decode_nucleotide(base: u8) -> Result<u8> {
     Ok(b)
 }
 
-fn read_index_from_file(
-    file: &mut std::fs::File,
-) -> Result<(DataStoreIndex, IndexSet<String>, u32, u32, u32)> {
-    file.seek(std::io::SeekFrom::End(-28))?;
+fn read_metadata(file: &mut std::fs::File) -> Result<StoreMetadata> {
+    file.seek(std::io::SeekFrom::End(-12))?;
+
     let mut buffer = [0; 8];
     file.read_exact(&mut buffer)?;
     let start = u64::from_le_bytes(buffer);
-
     let mut buffer = [0; 4];
     file.read_exact(&mut buffer)?;
-    let index_len = u32::from_le_bytes(buffer);
-
-    file.read_exact(&mut buffer)?;
-    let data_key_len = u32::from_le_bytes(buffer);
-
-    file.read_exact(&mut buffer)?;
-    let sequence_length = u32::from_le_bytes(buffer);
-
-    file.read_exact(&mut buffer)?;
-    let resolution = u32::from_le_bytes(buffer);
-
-    file.read_exact(&mut buffer)?;
-    let padding = u32::from_le_bytes(buffer);
+    let bytes_len = u32::from_le_bytes(buffer);
 
     file.seek(std::io::SeekFrom::Start(start))?;
-    let mut index_data = vec![0; index_len as usize];
-    file.read_exact(&mut index_data)?;
-    let index = DataStoreIndex::decode(&index_data)?;
-
-    let mut data_key_bytes = vec![0; data_key_len as usize];
-    file.read_exact(&mut data_key_bytes)?;
-    let data_key_bytes = decompress_data_zst(&data_key_bytes);
-    let data_keys: IndexSet<String> =
-        bincode::serde::decode_from_slice(&data_key_bytes, bincode::config::standard())?.0;
-
-    Ok((index, data_keys, sequence_length, resolution, padding))
+    let mut buffer = vec![0; bytes_len as usize];
+    file.read_exact(&mut buffer)?;
+    Ok(StoreMetadata::decode(&buffer)?)
 }
 
 /// Array Helper
@@ -954,7 +916,7 @@ mod tests {
         let mut store = DataStoreBuilder::new(
             &location, 128, // sequence length
             2,   // resolution
-            0,   // padding
+            4,   // padding
         )
         .unwrap();
 
@@ -968,7 +930,7 @@ mod tests {
             .map(|r| {
                 (r.clone(), {
                     let mut rng = rand::rng();
-                    (0..(128))
+                    (0..(128 + 8))
                         .map(|_| {
                             let n = rng.random_range(0..5);
                             match n {
@@ -992,7 +954,7 @@ mod tests {
                 let between = Uniform::new(0.0, 100.0).unwrap();
                 (
                     r.clone(),
-                    (0..(128 / 2))
+                    (0..((128 + 8) / 2))
                         .map(|_| bf16::from_f32(between.sample(&mut rng) as f32))
                         .collect::<Vec<bf16>>(),
                 )
@@ -1020,7 +982,7 @@ mod tests {
         let ground_truth = random_values
             .into_iter()
             .map(|(_, x)| {
-                Array3::from_shape_vec((1, 64, 1), x)
+                Array3::from_shape_vec((1, 64, 1), x[2..66].to_vec())
                     .unwrap()
                     .mapv(|v| v.to_f32())
             })
