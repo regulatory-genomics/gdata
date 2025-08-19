@@ -61,11 +61,10 @@ use super::super::generic::PrefethIterator;
         This is useful for cases where you want to work with the sequences as text,
         such as for visualization or text-based analysis.
     n_jobs: int
-        The number of chunks to prefetch for efficient data loading.
-        The chunks here refer to the data chunks stored in the GenomeDataBuilder.
+        The number of parallel jobs to use for loading data.
         This allows for asynchronous loading of data, improving performance during training or inference.
         But it will increase memory usage, the memory usage will be approximately
-        `2 * prefetch * memory_of_chunk`.
+        `2 * n_jobs * memory_of_chunk`.
     random_seed : int
         The random seed for shuffling the data. Default is 2025.
 
@@ -115,7 +114,7 @@ impl std::fmt::Display for GenomeDataLoader {
             self.data_store
                 .read_opts
                 .value_length
-                .unwrap_or(self.data_store.sequence_length)
+                .unwrap_or(self.data_store.sequence_length())
         )?;
         Ok(())
     }
@@ -125,7 +124,7 @@ impl GenomeDataLoader {
     pub fn len(&self) -> usize {
         let mut n = self.segments.len();
         if let Some(split_size) = self.data_store.read_opts.split_size {
-            n *= (self.data_store.sequence_length / split_size) as usize
+            n *= (self.data_store.sequence_length() / split_size) as usize
         }
         n / self.batch_size + if n % self.batch_size > 0 { 1 } else { 0 }
     }
@@ -196,7 +195,7 @@ impl GenomeDataLoader {
         };
 
         let data_store = DataStore::open(location, store_opts)?;
-        let segments = data_store.index.keys().cloned().collect();
+        let segments = data_store.segments().cloned().collect();
 
         let loader = Self {
             data_store,
@@ -224,7 +223,7 @@ impl GenomeDataLoader {
     #[getter]
     pub fn tracks(&self) -> Vec<String> {
         self.data_store
-            .data_keys
+            .data_keys()
             .iter()
             .cloned()
             .collect::<Vec<_>>()
@@ -258,7 +257,7 @@ impl GenomeDataLoader {
         self.data_store
             .read_opts
             .split_size
-            .unwrap_or(self.data_store.sequence_length)
+            .unwrap_or(self.data_store.sequence_length())
     }
 
     /** The length of the target vector in base pairs.
@@ -411,18 +410,19 @@ impl GenomeDataLoader {
         let trim = (slf.window_size() - slf.target_length()) / 2;
         let data_indexer = Self::data(slf);
         let key = (region, &tracks).into_pyobject(py)?.into_any();
-        let signal_values = data_indexer.__getitem__(py, key)?;
+        let signal_values = data_indexer.__getitem__(py, key)?.1;
         let track_names = extract_string_list(tracks)?;
 
         let py_code = r#"
 from matplotlib import pyplot as plt
+import numpy as np
 height_per_track = 1.5
 width = 8
 
 start, end = region.split(":")[1].split('-')
 start = int(start) + trim
 end = int(end) - trim
-signal_values = signal_values.T
+signal_values = np.squeeze(signal_values).T
 n_tracks, n_points = signal_values.shape
 fig, axes = plt.subplots(n_tracks, 1, figsize=[width, n_tracks * height_per_track], sharex=True)
 
@@ -616,7 +616,7 @@ impl DataIndexer {
 
         let idx: Vec<usize> = if let Ok(j_) = data_index.extract::<Vec<String>>() {
             j_.into_iter()
-                .map(|x| loader.data_store.data_keys.get_index_of(&x).unwrap())
+                .map(|x| loader.data_store.data_keys().get_index_of(&x).unwrap())
                 .collect()
         } else {
             data_index.extract()?

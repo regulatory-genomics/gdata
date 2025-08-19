@@ -135,7 +135,7 @@ mod tests {
                 None,
                 false,
                 true,
-                1,
+                3,
                 0,
             )
             .unwrap();
@@ -189,7 +189,7 @@ mod tests {
                 None,
                 false,
                 false,
-                1,
+                3,
                 0,
             )
             .unwrap();

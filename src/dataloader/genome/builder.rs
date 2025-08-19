@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use bed_utils::bed::{BEDLike, GenomicRange};
 use indexmap::IndexMap;
+use itertools::Itertools;
 use noodles::fasta::{
     fai::Index,
     io::{indexed_reader::Builder, IndexedReader},
@@ -122,7 +123,7 @@ impl GenomeDataBuilder {
             chrom_sizes.retain(|chrom, _| chroms.contains(chrom));
         }
 
-        let segments = if let Some(s) = segments {
+        let segments: Vec<_> = if let Some(s) = segments {
             let mut all_chroms = HashSet::new();
             let s = s
                 .into_iter()
@@ -141,6 +142,7 @@ impl GenomeDataBuilder {
                 .flat_map(|(_, iter)| iter)
                 .collect()
         };
+        assert!(segments.iter().all_unique(), "segments must be unique");
         store_builder.add_segments(segments, &mut fasta_reader)?;
 
         Ok(Self {

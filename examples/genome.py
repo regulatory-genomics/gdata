@@ -1,9 +1,10 @@
 from gdata import GenomeDataBuilder, GenomeDataLoader
 from pathlib import Path
 
-if not Path("test_genome").exists():
+data_path = Path("test_genome.gdata")
+if not data_path.exists():
     builder = GenomeDataBuilder(
-        "test_genome",
+        data_path,
         '/data/Public/genome/GRCh38/GRCh38.primary_assembly.genome.fa.gz',
         segments=["chr11:35041782-35238390", "chr11:35200000-35300000"],
         window_size=196_608,
@@ -17,11 +18,11 @@ if not Path("test_genome").exists():
             'dorsolateral_prefrontal_cortex-CTCF': 'dorsolateral_prefrontal_cortex-CTCF.w5z',
         }
     )
+    builder.finish()
 
 loader = GenomeDataLoader(
-    "test_genome",
-    #trim_target=40_960,
-    trim_target=40_960*2,
+    data_path,
+    target_length=40_960*2,
     resolution=1,
     seq_as_string=True,
 )

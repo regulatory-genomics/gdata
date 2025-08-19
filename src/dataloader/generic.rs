@@ -125,7 +125,7 @@ impl DataLoader {
     fn iter<T: serde::de::DeserializeOwned + Send>(&self) -> ParallelLoader<DataLoaderIter<T>, T> {
         let file = File::open(&self.path).expect("Failed to open data file");
         let num_works = 16;
-        let iters = split_into_n(&self.offset_and_size, num_works)
+        let iters = split_n_with_batch_size(&self.offset_and_size, num_works, 1)
             .into_iter()
             .map(|chunk| DataLoaderIter {
                 file: file.try_clone().expect("Failed to clone file handle"),
@@ -292,6 +292,16 @@ where
     }
 }
 
+impl<L, T> ExactSizeIterator for ParallelLoader<L, T>
+where
+    T: Send,
+    L: ExactSizeIterator<Item = T> + Send,
+{
+    fn len(&self) -> usize {
+        self.loaders.iter().map(|loader| loader.len()).sum()
+    }
+}
+
 impl<L, T> ParallelLoader<L, T>
 where
     T: Send,
@@ -354,7 +364,14 @@ pub(crate) struct ReBatch<T1, T2, D1, D2, I> {
     chunks: I,
 }
 
-impl<T1: Clone, T2: Clone, D1: Dimension, D2: Dimension, I> ReBatch<T1, T2, D1, D2, I> {
+impl<T1, T2, D1, D2, I> ReBatch<T1, T2, D1, D2, I>
+where
+    T1: Clone,
+    T2: Clone,
+    D1: Dimension,
+    D2: Dimension,
+    I: Iterator<Item = (Array<T1, D1>, Array<T2, D2>)>,
+{
     pub fn new(iter: I, batch_size: usize) -> Self {
         Self {
             batch_size,
@@ -515,10 +532,55 @@ pub(crate) fn decompress_data_zst(buffer: &[u8]) -> Vec<u8> {
     decompressed_data
 }
 
-pub(crate) fn split_into_n<T: Clone>(values: &[T], n: usize) -> Vec<Vec<T>> {
+/// Split a slice into `n` chunks.
+pub(crate) fn split_n_with_batch_size<T: Clone>(values: &[T], n: usize, batch_size: usize) -> Vec<Vec<T>> {
     let mut result = vec![Vec::new(); n];
-    values.iter().enumerate().for_each(|(i, v)| {
+    values.iter().enumerate().for_each(|(mut i, v)| {
+        i /= batch_size;
         result[i % n].push(v.clone());
     });
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{Array2, Axis};
+    use rand::Rng;
+
+    #[test]
+    fn test_split_n() {
+        let random_values = (0..100)
+            .map(|_| rand::rng().random_range(1.0..10.0))
+            .collect::<Vec<_>>();
+        let n = 3;
+        let result = split_n_with_batch_size(&random_values, n, 1);
+        assert_eq!(result.len(), n);
+
+        let iters = result.into_iter().map(|v| v.into_iter()).collect();
+        assert_eq!(random_values, ParallelLoader::new(iters).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_rebatch() {
+        let arr = Array2::from_shape_vec((11, 2), (0..22).collect::<Vec<_>>()).unwrap();
+        let data = vec![
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+            (arr.clone(), arr.clone()),
+        ];
+        let rebatch_iter = ReBatch::new(data.clone().into_iter(), 3);
+
+        let arrs = rebatch_iter.map(|(_, target)| target).collect::<Vec<_>>();
+        let arrs = ndarray::concatenate(Axis(0), &arrs.iter().map(|x| x.view()).collect::<Vec<_>>());
+
+        let ground_truth = data.into_iter().map(|(_, target)| target).collect::<Vec<_>>();
+        let ground_truth = ndarray::concatenate(Axis(0), &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>());
+
+        assert_eq!(arrs, ground_truth);
+    }
 }
