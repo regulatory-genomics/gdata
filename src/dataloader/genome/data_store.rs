@@ -3,10 +3,11 @@ use bed_utils::bed::{BEDLike, GenomicRange};
 use bincode::{Decode, Encode};
 use half::bf16;
 use indexmap::{IndexMap, IndexSet};
+use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, Axis};
 use noodles::core::Position;
 use noodles::fasta::io::IndexedReader;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -130,8 +131,8 @@ struct InnerStore {
 pub struct DataStore {
     inner: Arc<InnerStore>,
     pub out_resolution: u32,
-    aggregate_size: Option<u32>,
     pub read_opts: DataStoreReadOptions,
+    aggregate_size: Option<u32>,
 }
 
 impl DataStore {
@@ -194,6 +195,10 @@ impl DataStore {
 
     pub fn segments(&self) -> impl Iterator<Item = &GenomicRange> {
         self.inner.metadata.segment_index.keys()
+    }
+
+    pub fn num_segments(&self) -> usize {
+        self.inner.metadata.segment_index.len()
     }
 
     pub fn data_keys(&self) -> &IndexSet<String> {
@@ -306,8 +311,24 @@ impl DataStore {
         &self,
         batch_size: usize,
         num_threads: usize,
+        subset: Option<&[GenomicRange]>,
     ) -> impl Iterator<Item = (Array2<u8>, Array3<f32>)> {
-        let segments = self.inner.metadata.segment_index.keys().cloned().collect::<Vec<_>>();
+        let segments = if let Some(s) = subset {
+            assert!(
+                s.iter()
+                    .all(|r| self.inner.metadata.segment_index.contains_key(r)),
+                "Some segments in the subset do not exist in the data store"
+            );
+            s
+        } else {
+            &self
+                .inner
+                .metadata
+                .segment_index
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         let iters = split_n_with_batch_size(&segments, num_threads, batch_size)
             .into_iter()
             .map(|chunk| {
@@ -366,13 +387,6 @@ impl DataStoreBuilder {
         resolution: u32,
         padding: u32,
     ) -> Result<Self> {
-        if location.as_ref().exists() {
-            bail!(
-                "Data store location already exists: {}",
-                location.as_ref().display()
-            );
-        }
-
         ensure!(
             sequence_length % resolution == 0,
             "window size must be a multiple of resolution"
@@ -382,7 +396,10 @@ impl DataStoreBuilder {
             "Padding must be a multiple of resolution"
         );
 
-        std::fs::create_dir_all(&location)?;
+        if !location.as_ref().exists() {
+            std::fs::create_dir_all(&location)?;
+        }
+
         Ok(Self {
             location: location.as_ref().to_path_buf(),
             segments: IndexMap::new(),
@@ -400,34 +417,38 @@ impl DataStoreBuilder {
 
     fn add_seqs(
         &mut self,
-        seqs: impl IntoParallelIterator<Item = (GenomicRange, Vec<u8>)>,
+        seqs: impl IndexedParallelIterator<Item = (GenomicRange, Vec<u8>)>,
     ) -> Result<()> {
         let seq_len = self.total_sequence_length() as usize;
+        let chunk_size = seqs.len() / 32;
         let files = seqs
-            .into_par_iter()
-            .map(|(range, seq)| {
-                ensure!(
-                    seq.len() == seq_len,
-                    "Sequence length for range {} is {}, expected {}",
-                    range.pretty_show(),
-                    seq.len(),
-                    seq_len,
-                );
+            .chunks(chunk_size)
+            .flat_map_iter(|chunk| {
+                chunk.into_iter().map(|(range, seq)| {
+                    assert!(
+                        seq.len() == seq_len,
+                        "Sequence length for range {} is {}, expected {}",
+                        range.pretty_show(),
+                        seq.len(),
+                        seq_len,
+                    );
 
-                let file_path = self.location.join(range.pretty_show());
-                let mut file = File::create_new(&file_path).expect(&format!(
-                    "Failed to create sequence file at: {}",
-                    file_path.display()
-                ));
+                    let file_path = self.location.join(range.pretty_show());
+                    let mut file = File::create_new(&file_path).expect(&format!(
+                        "Failed to create sequence file at: {}",
+                        file_path.display()
+                    ));
 
-                let seq = compress_data_zst(seq, 5);
-                file.write_all(&(seq.len() as u64).to_le_bytes())?;
-                file.write_all(&seq)
-                    .expect("Failed to write sequences to file");
-                Ok((range, file))
+                    let seq = compress_data_zst(seq, 5);
+                    file.write_all(&(seq.len() as u64).to_le_bytes()).unwrap();
+                    file.write_all(&seq)
+                        .expect("Failed to write sequences to file");
+
+                    (range, file)
+                })
             })
-            .collect::<Result<Vec<_>>>();
-        files?.into_iter().for_each(|(range, file)| {
+            .collect::<Vec<_>>();
+        files.into_iter().for_each(|(range, file)| {
             self.segments.insert(range, file);
         });
         Ok(())
@@ -458,7 +479,7 @@ impl DataStoreBuilder {
     fn add_values(
         &mut self,
         key: impl Into<String>,
-        data: impl IntoParallelIterator<Item = (GenomicRange, Vec<bf16>)>,
+        data: impl IndexedParallelIterator<Item = (GenomicRange, Vec<bf16>)>,
     ) -> Result<()> {
         let key = key.into();
         if self.data_keys.contains(&key) {
@@ -472,29 +493,32 @@ impl DataStoreBuilder {
             .iter_mut()
             .map(|(k, file)| (k, Arc::new(Mutex::new(file))))
             .collect();
-        data.into_par_iter().try_for_each(|(range, values)| {
-            ensure!(
-                values.len() == val_len,
-                "Values length for range {} is {}, expected {}",
-                range.pretty_show(),
-                values.len(),
-                val_len,
-            );
-            let mut file = segments
-                .get(&range)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "No sequence for range {} exists. Add sequences first!",
-                        range.pretty_show()
-                    )
-                })?
-                .lock()
-                .unwrap();
-            let values = bincode::serde::encode_to_vec(values, bincode::config::standard())?;
-            let values = compress_data_zst(values, 5);
-            file.write_all(&values.len().to_le_bytes())?;
-            file.write_all(&values)?;
-            Ok(())
+        let chunk_size = data.len() / 32;
+        data.chunks(chunk_size).try_for_each(|chunk| {
+            chunk.into_iter().try_for_each(|(range, values)| {
+                ensure!(
+                    values.len() == val_len,
+                    "Values length for range {} is {}, expected {}",
+                    range.pretty_show(),
+                    values.len(),
+                    val_len,
+                );
+                let mut file = segments
+                    .get(&range)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No sequence for range {} exists. Add sequences first!",
+                            range.pretty_show()
+                        )
+                    })?
+                    .lock()
+                    .unwrap();
+                let values = bincode::serde::encode_to_vec(values, bincode::config::standard())?;
+                let values = compress_data_zst(values, 5);
+                file.write_all(&values.len().to_le_bytes())?;
+                file.write_all(&values)?;
+                Ok(())
+            })
         })
     }
 
@@ -502,117 +526,85 @@ impl DataStoreBuilder {
         let regions: Vec<_> = self.segments.keys().cloned().collect();
         let key = key.into();
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(16)
-            .build()
-            .unwrap()
-            .install(|| {
-                // Load the W5Z data
-                let data = data
-                    .keys()?
-                    .into_par_iter()
-                    .map(|chr| {
-                        let v: Vec<_> = data
-                            .get(&chr)?
-                            .into_iter()
-                            .map(|v| bf16::from_f32(v))
-                            .collect();
-                        Ok((chr, v))
-                    })
-                    .collect::<Result<HashMap<_, _>>>()?;
-
-                let padding = self.padding as isize;
-                let seq_len = self.total_sequence_length() as isize;
-                let resolution = self.resolution as usize;
-                let values = regions.into_par_iter().map(|range| {
-                    let values = data.get(range.chrom()).unwrap();
-                    let start = range.start() as isize - padding;
-                    let end = start + seq_len;
-                    let mut output_vec = slice_pad(values, start, end, bf16::ZERO);
-
-                    if resolution > 1 {
-                        output_vec = output_vec
-                            .chunks(resolution)
-                            .map(|x| {
-                                let m: average::Mean = x.iter().map(|x| f64::from(*x)).collect();
-                                bf16::from_f64(m.mean())
-                            })
-                            .collect();
-                    }
-
-                    (range, output_vec)
-                });
-
-                self.add_values(key, values)?;
-                Ok(())
+        // Load the W5Z data
+        let data = data
+            .keys()?
+            .into_par_iter()
+            .map(|chr| {
+                let v: Vec<_> = data
+                    .get(&chr)?
+                    .into_iter()
+                    .map(|v| bf16::from_f32(v))
+                    .collect();
+                Ok((chr, v))
             })
-    }
+            .collect::<Result<HashMap<_, _>>>()?;
 
-    /// Clears the data store, removing all intermediate files and data.
-    pub fn clear(self) -> Result<()> {
-        std::fs::remove_dir_all(&self.location).with_context(|| {
-            format!("Failed to clear data store at {}", self.location.display())
-        })?;
+        let padding = self.padding as isize;
+        let seq_len = self.total_sequence_length() as isize;
+        let resolution = self.resolution as usize;
+        let values = regions.into_par_iter().map(|range| {
+            let values = data.get(range.chrom()).unwrap();
+            let start = range.start() as isize - padding;
+            let end = start + seq_len;
+            let mut output_vec = slice_pad(values, start, end, bf16::ZERO);
+
+            if resolution > 1 {
+                output_vec = output_vec
+                    .chunks(resolution)
+                    .map(|x| {
+                        let m: average::Mean = x.iter().map(|x| f64::from(*x)).collect();
+                        bf16::from_f64(m.mean())
+                    })
+                    .collect();
+            }
+
+            (range, output_vec)
+        });
+
+        self.add_values(key, values)?;
         Ok(())
     }
 
-    pub fn finish(self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn finish(mut self, path: impl AsRef<Path>) -> Result<()> {
         let mut store = File::create(&path).with_context(|| {
             format!(
                 "Failed to create data store file at {}",
                 path.as_ref().display()
             )
         })?;
-        let mut offset = 0;
+
+        let n_keys = self.data_keys.len();
+        let sizes: Vec<_> = self
+            .segments
+            .values_mut()
+            .chunks(32)
+            .into_iter()
+            .flat_map(|chunk| {
+                let (bytes, sizes): (Vec<_>, Vec<_>) = chunk
+                    .collect::<Vec<_>>()
+                    .into_par_iter()
+                    .map(|file| compress_data_file(file, n_keys).unwrap())
+                    .unzip();
+                bytes.into_iter().for_each(|bytes| {
+                    store.write_all(&bytes).unwrap();
+                });
+                sizes
+            })
+            .collect();
+
         let segment_index = self
             .segments
-            .iter()
-            .map(|(range, mut file)| {
-                file.seek(std::io::SeekFrom::Start(0))?;
-
-                let mut n = [0; 8];
-                file.read_exact(&mut n)?;
-                let n = u64::from_le_bytes(n);
-
-                let mut buf = vec![0; n as usize];
-                file.read_exact(&mut buf)?;
-                let seq = decompress_data_zst(&buf);
-
-                let nrow = self.data_keys.len();
-                let mut ncol = 0;
-                let data: Vec<_> = std::iter::repeat_with(|| {
-                    let mut n = [0; 8];
-                    file.read_exact(&mut n).unwrap();
-                    let n = u64::from_le_bytes(n) as usize;
-
-                    let mut buf = vec![0; n];
-                    file.read_exact(&mut buf).unwrap();
-                    let values = decompress_data_zst(&buf);
-                    let values: Vec<bf16> =
-                        bincode::serde::decode_from_slice(&values, bincode::config::standard())
-                            .unwrap()
-                            .0;
-                    ncol = values.len();
-                    values
-                })
-                .take(nrow)
-                .flatten()
-                .collect();
-                // Note the array dimension here is: (experiment, sequence).
-                // This is key to get the best compression ratio.
-                let arr = Array2::from_shape_vec((nrow, ncol), data)
-                    .map_err(|e| anyhow::anyhow!("Failed to create array: {}", e))?;
-
-                let bytes = bincode::serde::encode_to_vec((seq, arr), bincode::config::standard())?;
-                let bytes = compress_data_zst(bytes, 9);
-                let n_bytes = bytes.len() as u64;
-
-                store.write_all(&bytes)?;
-                let o = Offset((offset, n_bytes));
-                offset += n_bytes;
-                Ok((range.clone(), o))
+            .keys()
+            .cloned()
+            .zip(sizes.into_iter())
+            .scan(0u64, |offset, (range, n_bytes)| {
+                let o = Offset((*offset, n_bytes as u64));
+                *offset += n_bytes as u64;
+                Some((range, o))
             })
-            .collect::<Result<IndexMap<_, _>>>()?;
+            .collect::<IndexMap<_, _>>();
+        let offset = segment_index.last().unwrap().1 .0;
 
         let metadata = StoreMetadata {
             segment_index,
@@ -626,11 +618,51 @@ impl DataStoreBuilder {
         let metadata_len = metadata_byes.len() as u32;
 
         // 8 + 4 = 12 bytes for the index metadata
-        store.write_all(&offset.to_le_bytes())?; // 8 bytes
+        store.write_all(&(offset.0 + offset.1).to_le_bytes())?; // 8 bytes
         store.write_all(&metadata_len.to_le_bytes())?; // 4 bytes
-
-        self.clear()
+        Ok(())
     }
+}
+
+fn compress_data_file(file: &mut File, nrow: usize) -> Result<(Vec<u8>, usize)> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+
+    let mut n = [0; 8];
+    file.read_exact(&mut n)?;
+    let n = u64::from_le_bytes(n);
+
+    let mut buf = vec![0; n as usize];
+    file.read_exact(&mut buf)?;
+    let seq = decompress_data_zst(&buf);
+
+    let mut ncol = 0;
+    let data: Vec<_> = std::iter::repeat_with(|| {
+        let mut n = [0; 8];
+        file.read_exact(&mut n).unwrap();
+        let n = u64::from_le_bytes(n) as usize;
+
+        let mut buf = vec![0; n];
+        file.read_exact(&mut buf).unwrap();
+        let values = decompress_data_zst(&buf);
+        let values: Vec<bf16> =
+            bincode::serde::decode_from_slice(&values, bincode::config::standard())
+                .unwrap()
+                .0;
+        ncol = values.len();
+        values
+    })
+    .take(nrow)
+    .flatten()
+    .collect();
+    // Note the array dimension here is: (experiment, sequence).
+    // This is key to get the best compression ratio.
+    let arr = Array2::from_shape_vec((nrow, ncol), data)
+        .map_err(|e| anyhow::anyhow!("Failed to create array: {}", e))?;
+
+    let bytes = bincode::serde::encode_to_vec((seq, arr), bincode::config::standard())?;
+    let bytes = compress_data_zst(bytes, 9);
+    let n_bytes = bytes.len();
+    Ok((bytes, n_bytes))
 }
 
 fn get_seq(
@@ -854,7 +886,7 @@ mod tests {
             (regions[0].clone(), vec![b'A', b'C', b'G', b'T', b'A', b'C']),
             (regions[1].clone(), vec![b'N', b'C', b'G', b'T', b'A', b'C']),
         ];
-        store.add_seqs(seqs).unwrap();
+        store.add_seqs(seqs.into_par_iter()).unwrap();
 
         let val1 = [
             (
@@ -872,7 +904,7 @@ mod tests {
                     .collect(),
             ),
         ];
-        store.add_values("key1", val1).unwrap();
+        store.add_values("key1", val1.into_par_iter()).unwrap();
 
         let val2 = [
             (
@@ -890,7 +922,7 @@ mod tests {
                     .collect(),
             ),
         ];
-        store.add_values("key2", val2).unwrap();
+        store.add_values("key2", val2.into_par_iter()).unwrap();
 
         store.finish(temp_dir.as_ref().join("store.gdata")).unwrap();
 
@@ -945,7 +977,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        store.add_seqs(random_seqs).unwrap();
+        store.add_seqs(random_seqs.into_par_iter()).unwrap();
 
         let random_values = random_regions
             .iter()
@@ -961,38 +993,77 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        store.add_values("key1", random_values.clone()).unwrap();
+        store
+            .add_values("key1", random_values.clone().into_par_iter())
+            .unwrap();
         store.finish(temp_dir.as_ref().join("store.gdata")).unwrap();
 
-        let store = DataStore::open(
-            temp_dir.as_ref().join("store.gdata"),
-            DataStoreReadOptions::default(),
-        )
-        .unwrap();
+        {
+            let store = DataStore::open(
+                temp_dir.as_ref().join("store.gdata"),
+                DataStoreReadOptions::default(),
+            )
+            .unwrap();
 
-        let values_iter = store.par_iter(3, 2);
+            let values_iter = store.par_iter(3, 2, None);
 
-        let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
-        let values = ndarray::concatenate(
-            Axis(0),
-            &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
-        )
-        .unwrap();
+            let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
+            let values = ndarray::concatenate(
+                Axis(0),
+                &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
+            )
+            .unwrap();
 
-        let ground_truth = random_values
-            .into_iter()
-            .map(|(_, x)| {
-                Array3::from_shape_vec((1, 64, 1), x[2..66].to_vec())
-                    .unwrap()
-                    .mapv(|v| v.to_f32())
-            })
-            .collect::<Vec<_>>();
-        let ground_truth = ndarray::concatenate(
-            Axis(0),
-            &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>(),
-        )
-        .unwrap();
+            let ground_truth = random_values
+                .iter()
+                .map(|(_, x)| {
+                    Array3::from_shape_vec((1, 64, 1), x[2..66].to_vec())
+                        .unwrap()
+                        .mapv(|v| v.to_f32())
+                })
+                .collect::<Vec<_>>();
+            let ground_truth = ndarray::concatenate(
+                Axis(0),
+                &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>(),
+            )
+            .unwrap();
 
-        assert_eq!(values, ground_truth);
+            assert_eq!(values, ground_truth);
+        }
+
+        {
+            let store = DataStore::open(
+                temp_dir.as_ref().join("store.gdata"),
+                DataStoreReadOptions {
+                    shift: -2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let values_iter = store.par_iter(3, 2, None);
+            let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
+            let values = ndarray::concatenate(
+                Axis(0),
+                &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let ground_truth = random_values
+                .iter()
+                .map(|(_, x)| {
+                    Array3::from_shape_vec((1, 64, 1), x[1..65].to_vec())
+                        .unwrap()
+                        .mapv(|v| v.to_f32())
+                })
+                .collect::<Vec<_>>();
+            let ground_truth = ndarray::concatenate(
+                Axis(0),
+                &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            assert_eq!(values, ground_truth);
+        }
     }
 }

@@ -8,11 +8,11 @@ use numpy::{PyArray2, PyArray3};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 use std::str::FromStr;
 
-use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataStoreReadOptions};
 use super::super::generic::PrefethIterator;
+use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataStoreReadOptions};
 
 /** A dataloader for genomic data, allowing for efficient retrieval of genomic
     sequences and their associated values.
@@ -88,7 +88,7 @@ use super::super::generic::PrefethIterator;
 #[derive(Debug, Clone)]
 pub struct GenomeDataLoader {
     data_store: DataStore,
-    segments: Vec<GenomicRange>,
+    subset: Option<Vec<GenomicRange>>,
     #[pyo3(get, set)]
     batch_size: usize,
     shuffle: bool,
@@ -102,7 +102,7 @@ impl std::fmt::Display for GenomeDataLoader {
         writeln!(
             f,
             "GenomeDataLoader ({} segments x {} tracks):",
-            self.segments.len(),
+            self.num_segments(),
             self.tracks().len()
         )?;
         write!(
@@ -121,8 +121,14 @@ impl std::fmt::Display for GenomeDataLoader {
 }
 
 impl GenomeDataLoader {
-    pub fn len(&self) -> usize {
-        let mut n = self.segments.len();
+    pub fn num_segments(&self) -> usize {
+        self.subset
+            .as_ref()
+            .map_or_else(|| self.data_store.num_segments(), |s| s.len())
+    }
+
+    pub fn num_batch(&self) -> usize {
+        let mut n = self.num_segments();
         if let Some(split_size) = self.data_store.read_opts.split_size {
             n *= (self.data_store.sequence_length() / split_size) as usize
         }
@@ -138,16 +144,50 @@ impl GenomeDataLoader {
     }
 
     pub fn intersection(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
-        todo!()
+        let regions: HashSet<_> = regions.collect();
+        let subset = if let Some(subset) = &self.subset {
+            subset
+                .iter()
+                .filter(|x| regions.contains(x))
+                .cloned()
+                .collect()
+        } else {
+            self.data_store.segments()
+                .filter(|x| regions.contains(x))
+                .cloned()
+                .collect()
+        };
+        let mut loader = self.clone();
+        loader.subset = Some(subset);
+        loader
     }
 
     pub fn difference(&self, regions: impl Iterator<Item = GenomicRange>) -> Self {
-        todo!()
+        let regions: HashSet<_> = regions.collect();
+        let subset = if let Some(subset) = &self.subset {
+            subset
+                .iter()
+                .filter(|x| !regions.contains(x))
+                .cloned()
+                .collect()
+        } else {
+            self.data_store.segments()
+                .filter(|x| !regions.contains(x))
+                .cloned()
+                .collect()
+        };
+        let mut loader = self.clone();
+        loader.subset = Some(subset);
+        loader
     }
 
     pub fn iter(&mut self) -> GenomeDataLoaderIter {
         let iter = PrefethIterator::new(
-            self.data_store.par_iter(self.batch_size, self.n_jobs),
+            self.data_store.par_iter(
+                self.batch_size,
+                self.n_jobs,
+                self.subset.as_ref().map(|x| x.as_slice()),
+            ),
             self.n_jobs * 2,
         );
 
@@ -194,12 +234,9 @@ impl GenomeDataLoader {
             clamp_value_max: clamp_max.map(|x| bf16::from_f32(x)),
         };
 
-        let data_store = DataStore::open(location, store_opts)?;
-        let segments = data_store.segments().cloned().collect();
-
         let loader = Self {
-            data_store,
-            segments,
+            data_store: DataStore::open(location, store_opts)?,
+            subset: None,
             batch_size,
             shuffle,
             seq_as_string,
@@ -238,7 +275,14 @@ impl GenomeDataLoader {
     */
     #[getter]
     pub fn segments(&self) -> Vec<String> {
-        self.segments.iter().map(|x| x.pretty_show()).collect()
+        if let Some(subset) = &self.subset {
+            subset.iter().map(|x| x.pretty_show()).collect()
+        } else {
+            self.data_store
+                .segments()
+                .map(|x| x.pretty_show())
+                .collect()
+        }
     }
 
     /** The length of input sequences in base pairs.
@@ -537,7 +581,7 @@ else:
     }
 
     fn __len__(&self) -> usize {
-        self.len()
+        self.num_batch()
     }
 
     fn __iter__(mut slf: PyRefMut<'_, Self>) -> GenomeDataLoaderIter {
@@ -625,7 +669,10 @@ impl DataIndexer {
         let val: Array3<bf16> = val.into();
         let val = val.select(Axis(2), &idx).mapv(|x| x.to_f32());
 
-        Ok((seq_to_string(&seq.into()), PyArray3::from_owned_array(py, val)))
+        Ok((
+            seq_to_string(&seq.into()),
+            PyArray3::from_owned_array(py, val),
+        ))
     }
 }
 
@@ -681,7 +728,7 @@ impl std::fmt::Display for GenomeDataLoaderMap {
 
 impl GenomeDataLoaderMap {
     pub fn len(&self) -> usize {
-        self.0[0].len()
+        self.0[0].num_batch()
     }
 
     pub fn iter(&mut self) -> MultiDataLoaderIter {
@@ -1072,7 +1119,6 @@ impl MultiGenomeIter {
         Some(result)
     }
 }
-
 
 fn extract_string_list(str: Bound<'_, PyAny>) -> Result<Vec<String>> {
     if let Ok(s) = str.extract::<String>() {

@@ -59,21 +59,20 @@ use crate::w5z::W5Z;
 #[pyclass]
 pub struct GenomeDataBuilder {
     location: PathBuf,
-    tmp_dir: TempDir,
-    store_builder: Option<DataStoreBuilder>,
+    store_builder: Option<(DataStoreBuilder, TempDir)>,
 }
 
 impl GenomeDataBuilder {
     fn store(&self) -> &DataStoreBuilder {
-        self.store_builder
+        &self.store_builder
             .as_ref()
-            .expect("data store has been moved")
+            .expect("data store has been moved").0
     }
 
     fn store_mut(&mut self) -> &mut DataStoreBuilder {
-        self.store_builder
+        &mut self.store_builder
             .as_mut()
-            .expect("data store has been moved")
+            .expect("data store has been moved").0
     }
 }
 
@@ -104,7 +103,7 @@ impl GenomeDataBuilder {
             tempfile::tempdir()?
         };
         let mut store_builder = DataStoreBuilder::new(
-            tmp_dir.as_ref().join("tmp_gdata_builder"),
+            &tmp_dir,
             window_size,
             resolution,
             0,
@@ -147,8 +146,7 @@ impl GenomeDataBuilder {
 
         Ok(Self {
             location,
-            tmp_dir,
-            store_builder: Some(store_builder),
+            store_builder: Some((store_builder, tmp_dir)),
         })
     }
 
@@ -234,7 +232,7 @@ impl GenomeDataBuilder {
        None
     */
     pub fn finish(&mut self) -> Result<()> {
-        let store_builder = self
+        let (store_builder, _) = self
             .store_builder
             .take()
             .expect("data store has been moved");
