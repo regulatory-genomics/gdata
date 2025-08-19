@@ -7,6 +7,9 @@ use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, Axis};
 use noodles::core::Position;
 use noodles::fasta::io::IndexedReader;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_chacha::ChaCha12Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -106,6 +109,7 @@ pub struct DataStoreReadOptions {
     pub read_resolution: Option<u32>,
     pub scale_value: Option<bf16>,
     pub clamp_value_max: Option<bf16>,
+    pub rng: ChaCha12Rng,
 }
 
 impl Default for DataStoreReadOptions {
@@ -117,6 +121,7 @@ impl Default for DataStoreReadOptions {
             read_resolution: None,
             scale_value: None,
             clamp_value_max: None,
+            rng: ChaCha12Rng::seed_from_u64(0),
         }
     }
 }
@@ -308,20 +313,21 @@ impl DataStore {
     }
 
     pub fn par_iter(
-        &self,
+        &mut self,
         batch_size: usize,
         num_threads: usize,
+        shuffle: bool,
         subset: Option<&[GenomicRange]>,
     ) -> impl Iterator<Item = (Array2<u8>, Array3<f32>)> {
-        let segments = if let Some(s) = subset {
+        let mut segments = if let Some(s) = subset {
             assert!(
                 s.iter()
                     .all(|r| self.inner.metadata.segment_index.contains_key(r)),
                 "Some segments in the subset do not exist in the data store"
             );
-            s
+            s.to_vec()
         } else {
-            &self
+            self
                 .inner
                 .metadata
                 .segment_index
@@ -329,6 +335,9 @@ impl DataStore {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        if shuffle {
+            segments.shuffle(&mut self.read_opts.rng);
+        }
         let iters = split_n_with_batch_size(&segments, num_threads, batch_size)
             .into_iter()
             .map(|chunk| {
@@ -999,13 +1008,13 @@ mod tests {
         store.finish(temp_dir.as_ref().join("store.gdata")).unwrap();
 
         {
-            let store = DataStore::open(
+            let mut store = DataStore::open(
                 temp_dir.as_ref().join("store.gdata"),
                 DataStoreReadOptions::default(),
             )
             .unwrap();
 
-            let values_iter = store.par_iter(3, 2, None);
+            let values_iter = store.par_iter(3, 2, false, None);
 
             let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
             let values = ndarray::concatenate(
@@ -1032,7 +1041,7 @@ mod tests {
         }
 
         {
-            let store = DataStore::open(
+            let mut store = DataStore::open(
                 temp_dir.as_ref().join("store.gdata"),
                 DataStoreReadOptions {
                     shift: -2,
@@ -1041,7 +1050,7 @@ mod tests {
             )
             .unwrap();
 
-            let values_iter = store.par_iter(3, 2, None);
+            let values_iter = store.par_iter(3, 2, false, None);
             let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
             let values = ndarray::concatenate(
                 Axis(0),

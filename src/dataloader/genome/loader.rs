@@ -94,7 +94,6 @@ pub struct GenomeDataLoader {
     shuffle: bool,
     seq_as_string: bool,
     n_jobs: usize,
-    rng: ChaCha12Rng,
 }
 
 impl std::fmt::Display for GenomeDataLoader {
@@ -186,6 +185,7 @@ impl GenomeDataLoader {
             self.data_store.par_iter(
                 self.batch_size,
                 self.n_jobs,
+                self.shuffle,
                 self.subset.as_ref().map(|x| x.as_slice()),
             ),
             self.n_jobs * 2,
@@ -232,6 +232,8 @@ impl GenomeDataLoader {
             read_resolution: resolution,
             scale_value: scale.map(|x| bf16::from_f32(x)),
             clamp_value_max: clamp_max.map(|x| bf16::from_f32(x)),
+            rng: ChaCha12Rng::seed_from_u64(random_seed),
+            ..Default::default()
         };
 
         let loader = Self {
@@ -241,7 +243,6 @@ impl GenomeDataLoader {
             shuffle,
             seq_as_string,
             n_jobs,
-            rng: ChaCha12Rng::seed_from_u64(random_seed),
         };
 
         Ok(loader)
