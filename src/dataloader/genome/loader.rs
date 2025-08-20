@@ -8,8 +8,8 @@ use numpy::{PyArray2, PyArray3};
 use pyo3::{prelude::*, py_run};
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use std::{collections::HashSet, path::PathBuf};
 use std::str::FromStr;
+use std::{collections::HashSet, path::PathBuf};
 
 use super::super::generic::PrefethIterator;
 use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataStoreReadOptions};
@@ -19,8 +19,7 @@ use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataSt
 
     This object provides an iterator over genomic data chunks, enabling batch
     retrieval of genomic sequences and their associated values.
-    The iterator yields tuples of (sequences, values) or (tag, sequences, values),
-    depending on whether a tag is provided.
+    The iterator yields tuples of (sequences, values).
     Sequences has shape (batch_size, sequence_length), and values has shape
     (batch_size, sequence_length / resolution, num_tracks).
 
@@ -56,6 +55,11 @@ use crate::dataloader::genome::data_store::{decode_nucleotide, DataStore, DataSt
         (2) The loader's window size must be a multiple of the dataset's resolution.
     shuffle : bool
         If True, the data will be shuffled before being returned. Default is False.
+    random_shift: int
+        The maximum random shift (in base pairs) to apply to the start position of each sequence.
+        The actual shift will be randomly chosen from the range [-random_shift, random_shift].
+        This is useful for data augmentation, as it introduces variability in the sequences
+        retrieved from the dataset.
     seq_as_string : bool
         If True, sequences will be returned as strings instead of numpy integer arrays.
         This is useful for cases where you want to work with the sequences as text,
@@ -106,14 +110,15 @@ impl std::fmt::Display for GenomeDataLoader {
         )?;
         write!(
             f,
-            "    window_size = {}, resolution = {}, batch_size = {}, target_length = {}",
+            "    window_size = {}, resolution = {}, batch_size = {}, target_length = {}, padding = {}",
             self.window_size(),
             self.resolution(),
             self.batch_size,
             self.data_store
                 .read_opts
                 .value_length
-                .unwrap_or(self.data_store.sequence_length())
+                .unwrap_or(self.data_store.sequence_length()),
+            self.data_store.n_pad(),
         )?;
         Ok(())
     }
@@ -151,7 +156,8 @@ impl GenomeDataLoader {
                 .cloned()
                 .collect()
         } else {
-            self.data_store.segments()
+            self.data_store
+                .segments()
                 .filter(|x| regions.contains(x))
                 .cloned()
                 .collect()
@@ -170,7 +176,8 @@ impl GenomeDataLoader {
                 .cloned()
                 .collect()
         } else {
-            self.data_store.segments()
+            self.data_store
+                .segments()
                 .filter(|x| !regions.contains(x))
                 .cloned()
                 .collect()
@@ -204,12 +211,12 @@ impl GenomeDataLoader {
     #[pyo3(
         signature = (location, *,
             batch_size=8, resolution=None, target_length=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=false, seq_as_string=false, n_jobs=8,
+            window_size=None, shuffle=false, random_shift=0, seq_as_string=false, n_jobs=8,
             random_seed=2025,
         ),
         text_signature = "($self, location, *,
             batch_size=8, resolution=None, target_length=None, scale=None, clamp_max=None,
-            window_size=None, shuffle=False, seq_as_string=False, n_jobs=8,
+            window_size=None, shuffle=False, random_shift=0, seq_as_string=False, n_jobs=8,
             random_seed=2025)"
     )]
     pub fn new(
@@ -221,12 +228,13 @@ impl GenomeDataLoader {
         clamp_max: Option<f32>,
         window_size: Option<u32>,
         shuffle: bool,
+        random_shift: u32,
         seq_as_string: bool,
         n_jobs: usize,
         random_seed: u64,
     ) -> Result<Self> {
         let store_opts = DataStoreReadOptions {
-            shift: 0,
+            shift_width: random_shift,
             value_length: target_length,
             split_size: window_size,
             read_resolution: resolution,
@@ -453,7 +461,7 @@ impl GenomeDataLoader {
         savefig: Option<PathBuf>,
     ) -> Result<()> {
         let trim = (slf.window_size() - slf.target_length()) / 2;
-        let data_indexer = Self::data(slf);
+        let mut data_indexer = Self::data(slf);
         let key = (region, &tracks).into_pyobject(py)?.into_any();
         let signal_values = data_indexer.__getitem__(py, key)?.1;
         let track_names = extract_string_list(tracks)?;
@@ -641,11 +649,11 @@ struct DataIndexer(Py<GenomeDataLoader>);
 #[pymethods]
 impl DataIndexer {
     fn __getitem__<'a>(
-        &'a self,
+        &'a mut self,
         py: Python<'a>,
         key: Bound<'a, PyAny>,
     ) -> Result<(Vec<String>, Bound<'a, PyArray3<f32>>)> {
-        let loader = self.0.borrow(py);
+        let mut loader = self.0.borrow_mut(py);
         let (seq_index, mut data_index): (Bound<'_, PyAny>, Bound<'_, PyAny>) = key.extract()?;
         if !data_index.is_instance_of::<pyo3::types::PyList>() {
             data_index = vec![data_index].into_pyobject(py)?.into_any();

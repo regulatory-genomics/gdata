@@ -109,6 +109,7 @@ mod tests {
             None,
             None,
             resolution,
+            8, 
             None,
             None,
         )
@@ -134,6 +135,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
                 true,
                 3,
                 0,
@@ -156,6 +158,7 @@ mod tests {
                 .collect();
             assert_eq!(values.len(), truth.len());
             assert_eq!(values, truth);
+            assert_eq!(seq.len(), fasta.len());
             assert_eq!(seq, fasta);
 
             let values: Vec<_> = loader
@@ -188,6 +191,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
                 false,
                 3,
                 0,
@@ -213,6 +217,7 @@ mod tests {
                 Some(4.0),
                 None,
                 false,
+                0,
                 false,
                 1,
                 0,
@@ -251,6 +256,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             true,
             1,
             0,
@@ -272,6 +278,7 @@ mod tests {
             None,
             Some(16),
             false,
+            0,
             true,
             1,
             0,
@@ -310,6 +317,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             false,
             1,
             0,
@@ -329,6 +337,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             false,
             1,
             0,
@@ -359,6 +368,7 @@ mod tests {
             None,
             Some(16),
             false,
+            0,
             true,
             1,
             0,
@@ -382,6 +392,7 @@ mod tests {
             None,
             Some(16),
             false,
+            0,
             true,
             1,
             0,
@@ -414,6 +425,7 @@ mod tests {
                 None,
                 Some(16),
                 false,
+                0,
                 false,
                 1,
                 0,
@@ -439,6 +451,7 @@ mod tests {
                 None,
                 Some(16),
                 false,
+                0,
                 false,
                 1,
                 0,

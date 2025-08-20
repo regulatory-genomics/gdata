@@ -8,7 +8,7 @@ use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, 
 use noodles::core::Position;
 use noodles::fasta::io::IndexedReader;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -101,21 +101,29 @@ impl StoreMetadata {
     }
 }
 
+/// Options for reading from the data store.
 #[derive(Debug, Clone)]
 pub struct DataStoreReadOptions {
-    pub shift: i32,
+    /// Random shift to apply to the sequence from -shift_width to +shift_width.
+    pub shift_width: u32,
+    /// Length of the values to read.
     pub value_length: Option<u32>,
+    /// Size of the split values.
     pub split_size: Option<u32>,
+    /// Resolution to read the data at.
     pub read_resolution: Option<u32>,
+    /// Scale value to apply to the values.
     pub scale_value: Option<bf16>,
+    /// Maximum value to clamp the values to.
     pub clamp_value_max: Option<bf16>,
+    /// Random number generator for shuffling.
     pub rng: ChaCha12Rng,
 }
 
 impl Default for DataStoreReadOptions {
     fn default() -> Self {
         Self {
-            shift: 0,
+            shift_width: 0,
             value_length: None,
             split_size: None,
             read_resolution: None,
@@ -145,14 +153,9 @@ impl DataStore {
         let mut file = File::open(&path).context("Failed to open data store file")?;
         let metadata = read_metadata(&mut file)?;
 
-        let shift = read_opts.shift.abs() as u32;
         ensure!(
-            shift <= metadata.padding,
+            read_opts.shift_width <= metadata.padding,
             "Shift must be less than or equal to padding"
-        );
-        ensure!(
-            shift % metadata.resolution == 0,
-            "Shift must be a multiple of resolution"
         );
 
         let mut aggregate_size = None;
@@ -214,15 +217,15 @@ impl DataStore {
         self.inner.metadata.sequence_length
     }
 
-    fn output_length(&self) -> u32 {
+    pub fn output_length(&self) -> u32 {
         self.read_opts.split_size.unwrap_or(self.sequence_length())
     }
 
-    fn n_pad(&self) -> u32 {
+    pub fn n_pad(&self) -> u32 {
         self.inner.metadata.padding
     }
 
-    fn resolution(&self) -> u32 {
+    pub fn resolution(&self) -> u32 {
         self.inner.metadata.resolution
     }
 
@@ -254,7 +257,7 @@ impl DataStore {
         Ok(())
     }
 
-    pub fn read(&self, region: &GenomicRange) -> Option<(Sequence, Values)> {
+    pub fn read(&mut self, region: &GenomicRange) -> Option<(Sequence, Values)> {
         let offset = self.inner.metadata.segment_index.get(region)?;
         let mut buffer = vec![0; offset.0 .1 as usize];
         self.inner
@@ -273,10 +276,15 @@ impl DataStore {
         let arr = arr.t().insert_axis(Axis(0));
 
         // Apply random shifting
-        let seq_start = (self.read_opts.shift + self.n_pad() as i32) as usize;
+        let mut shift = self.read_opts.shift_width as i32;
+        let res = self.resolution();
+        if self.read_opts.shift_width != 0 {
+            shift = self.read_opts.rng.random_range(-shift..=shift) / res as i32 * res as i32;
+        }
+        let seq_start = (shift + self.n_pad() as i32) as usize;
         let seq_end = seq_start + self.sequence_length() as usize;
-        let arr_start = seq_start / self.resolution() as usize;
-        let arr_end = seq_end / self.resolution() as usize;
+        let arr_start = seq_start / res as usize;
+        let arr_end = seq_end / res as usize;
         let mut seq = seq.slice(s![.., seq_start..seq_end]);
         let mut arr = arr.slice(s![.., arr_start..arr_end, ..]).to_owned();
 
@@ -307,9 +315,9 @@ impl DataStore {
         Some((seq.into(), arr.view().into()))
     }
 
-    pub fn read_at(&self, i: usize) -> Option<(Sequence, Values)> {
-        let region = self.inner.metadata.segment_index.get_index(i)?.0;
-        self.read(region)
+    pub fn read_at(&mut self, i: usize) -> Option<(Sequence, Values)> {
+        let region = self.inner.metadata.segment_index.get_index(i)?.0.clone();
+        self.read(&region)
     }
 
     pub fn par_iter(
@@ -327,8 +335,7 @@ impl DataStore {
             );
             s.to_vec()
         } else {
-            self
-                .inner
+            self.inner
                 .metadata
                 .segment_index
                 .keys()
@@ -471,18 +478,12 @@ impl DataStoreBuilder {
         let fasta = Arc::new(Mutex::new(fasta));
         let padding = self.padding as usize;
         let seq_len = self.total_sequence_length() as usize;
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(16)
-            .build()
-            .unwrap()
-            .install(|| {
-                let seqs = segments.into_par_iter().map(|segment| {
-                    let mut reader = fasta.lock().unwrap();
-                    let seq = get_seq(&mut reader, &segment, seq_len, padding).unwrap();
-                    (segment, seq)
-                });
-                self.add_seqs(seqs)
-            })
+        let seqs = segments.into_par_iter().map(|segment| {
+            let mut reader = fasta.lock().unwrap();
+            let seq = get_seq(&mut reader, &segment, seq_len, padding).unwrap();
+            (segment, seq)
+        });
+        self.add_seqs(seqs)
     }
 
     fn add_values(
@@ -685,6 +686,8 @@ fn get_seq(
     if pad > start {
         pad_left = pad - start;
         start = 0;
+    } else {
+        start -= pad;
     }
     let end = start + seq_len - pad_left;
     let interval = noodles::core::region::Region::new(
@@ -692,12 +695,18 @@ fn get_seq(
         Position::try_from(start + 1)?..=Position::try_from(end)?,
     );
 
-    let mut seq = vec![b'N'; pad_left];
-    seq.extend_from_slice(reader.query(&interval)?.sequence().as_ref());
-    seq.resize(seq_len, b'N');
-    seq.into_iter()
-        .map(|b| encode_nucleotide(b))
-        .collect::<Result<Vec<_>>>()
+    let base_n = encode_nucleotide(b'N')?;
+    let mut seq = vec![base_n; pad_left];
+    seq.extend(
+        reader
+            .query(&interval)?
+            .sequence()
+            .as_ref()
+            .iter()
+            .map(|b| encode_nucleotide(*b).unwrap()),
+    );
+    seq.resize(seq_len, base_n);
+    Ok(seq)
 }
 
 // Pad out-of-bounds slices with a specified value.
@@ -857,6 +866,86 @@ mod tests {
         Rng,
     };
 
+    fn create_store(
+        location: impl AsRef<Path>,
+        sequence_length: u32,
+        resolution: u32,
+        padding: u32,
+        n_segments: usize,
+        n_data: usize,
+    ) -> (Vec<Vec<u8>>, Array3<f32>) {
+        let mut rng = rand::rng();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tmp = temp_dir.as_ref().join("store_builder");
+        let mut store = DataStoreBuilder::new(&tmp, sequence_length, resolution, padding).unwrap();
+
+        let random_regions = (0..n_segments)
+            .map(|i| {
+                GenomicRange::from_str(&format!(
+                    "chr1:{}-{}",
+                    i * sequence_length as usize + 1,
+                    (i + 1) * sequence_length as usize
+                ))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let random_seqs = random_regions
+            .iter()
+            .map(|r| {
+                (r.clone(), {
+                    (0..(sequence_length + 2 * padding))
+                        .map(|_| rng.random_range(0..5))
+                        .collect::<Vec<u8>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        store.add_seqs(random_seqs.clone().into_par_iter()).unwrap();
+
+        let mut random_values = Vec::new();
+        for i in 0..n_data {
+            let key = format!("key{}", i + 1);
+            let values = random_regions
+                .iter()
+                .map(|r| {
+                    let between = Uniform::new(0.0, 100.0).unwrap();
+                    (
+                        r.clone(),
+                        (0..((sequence_length + 2 * padding) / resolution))
+                            .map(|_| bf16::from_f32(between.sample(&mut rng) as f32))
+                            .collect::<Vec<bf16>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            store
+                .add_values(key, values.clone().into_par_iter())
+                .unwrap();
+            let values: Vec<_> = values
+                .into_iter()
+                .map(|(_, v)| Array1::from_vec(v))
+                .collect();
+            let values = ndarray::stack(
+                Axis(0),
+                &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            random_values.push(values);
+        }
+
+        store.finish(location).unwrap();
+
+        let random_values = ndarray::stack(
+            Axis(2),
+            &random_values.iter().map(|x| x.view()).collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .mapv(|x| x.to_f32());
+
+        (
+            random_seqs.into_iter().map(|(_, seq)| seq).collect(),
+            random_values,
+        )
+    }
+
     #[test]
     fn test_arr_aggregation() {
         let arr = array![
@@ -877,202 +966,63 @@ mod tests {
     #[test]
     fn test_datastore() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let location = temp_dir.as_ref().join("store_builder");
+        let location = temp_dir.as_ref().join("store.gdata");
+        let (seqs, array) = create_store(&location, 1024, 2, 8, 100, 10);
 
-        let mut store = DataStoreBuilder::new(
-            &location, 6, // sequence length
-            2, // resolution
-            0, // padding
-        )
-        .unwrap();
+        let mut store = DataStore::open(location, DataStoreReadOptions::default()).unwrap();
 
-        let regions = [
-            GenomicRange::from_str("chr1:1-8").unwrap(),
-            GenomicRange::from_str("chr1:9-16").unwrap(),
-        ];
-
-        let seqs = [
-            (regions[0].clone(), vec![b'A', b'C', b'G', b'T', b'A', b'C']),
-            (regions[1].clone(), vec![b'N', b'C', b'G', b'T', b'A', b'C']),
-        ];
-        store.add_seqs(seqs.into_par_iter()).unwrap();
-
-        let val1 = [
-            (
-                regions[0].clone(),
-                vec![1.0, 2.0, 3.0]
-                    .into_iter()
-                    .map(bf16::from_f64)
-                    .collect(),
-            ),
-            (
-                regions[1].clone(),
-                vec![4.0, 5.0, 6.0]
-                    .into_iter()
-                    .map(bf16::from_f64)
-                    .collect(),
-            ),
-        ];
-        store.add_values("key1", val1.into_par_iter()).unwrap();
-
-        let val2 = [
-            (
-                regions[0].clone(),
-                vec![7.0, 8.0, 9.0]
-                    .into_iter()
-                    .map(bf16::from_f64)
-                    .collect(),
-            ),
-            (
-                regions[1].clone(),
-                vec![10.0, 11.0, 12.0]
-                    .into_iter()
-                    .map(bf16::from_f64)
-                    .collect(),
-            ),
-        ];
-        store.add_values("key2", val2.into_par_iter()).unwrap();
-
-        store.finish(temp_dir.as_ref().join("store.gdata")).unwrap();
-
-        let store = DataStore::open(
-            temp_dir.as_ref().join("store.gdata"),
-            DataStoreReadOptions::default(),
-        )
-        .unwrap();
-
-        let arr = store.read(&regions[0]).unwrap().1 .0;
-        assert_eq!(arr.dim(), (1, 3, 2));
+        let (s, v) = store.read_at(2).unwrap();
+        assert_eq!(s.0.into_raw_vec_and_offset().0, seqs[2][8..1024 + 8]);
+        assert_eq!(v.0.shape(), [1, 512, 10]);
         assert_eq!(
-            arr,
-            array![[[1.0, 7.0], [2.0, 8.0], [3.0, 9.0]],].mapv(bf16::from_f64)
+            v.0.mapv(|x| x.to_f32()),
+            array.slice(s![2..3, 8 / 2..(1024 + 8) / 2, ..]).to_owned()
+        );
+
+        let values_iter = store.par_iter(3, 2, false, None);
+        let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
+        let values = ndarray::concatenate(
+            Axis(0),
+            &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            values,
+            array.slice(s![.., 8 / 2..(1024 + 8) / 2, ..]).to_owned()
         );
     }
 
     #[test]
-    fn test_store_loader() {
+    fn test_shift() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let location = temp_dir.as_ref().join("store_builder");
+        let location = temp_dir.as_ref().join("store.gdata");
+        let (seqs, array) = create_store(&location, 1024, 2, 8, 100, 10);
 
-        let mut store = DataStoreBuilder::new(
-            &location, 128, // sequence length
-            2,   // resolution
-            4,   // padding
+        let mut opt = DataStoreReadOptions::default();
+        opt.shift_width = 4;
+        let mut store = DataStore::open(location, opt).unwrap();
+
+        let values_iter = store.par_iter(3, 2, false, None);
+        let (s, values): (Vec<_>, Vec<_>) = values_iter.unzip();
+        let s =
+            ndarray::concatenate(Axis(0), &s.iter().map(|x| x.view()).collect::<Vec<_>>()).unwrap();
+        let values = ndarray::concatenate(
+            Axis(0),
+            &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
         )
         .unwrap();
 
-        let random_regions = (0..100)
-            .map(|i| {
-                GenomicRange::from_str(&format!("chr1:{}-{}", i * 6 + 1, (i + 1) * 6)).unwrap()
-            })
-            .collect::<Vec<_>>();
-        let random_seqs = random_regions
-            .iter()
-            .map(|r| {
-                (r.clone(), {
-                    let mut rng = rand::rng();
-                    (0..(128 + 8))
-                        .map(|_| {
-                            let n = rng.random_range(0..5);
-                            match n {
-                                0 => b'A',
-                                1 => b'C',
-                                2 => b'G',
-                                3 => b'T',
-                                _ => b'N',
-                            }
-                        })
-                        .collect::<Vec<u8>>()
-                })
-            })
-            .collect::<Vec<_>>();
-        store.add_seqs(random_seqs.into_par_iter()).unwrap();
+        for i in 0..values.shape()[0] {
+            let start: i32 = 8;
+            let end: i32 = 1024 + 8;
 
-        let random_values = random_regions
-            .iter()
-            .map(|r| {
-                let mut rng = rand::rng();
-                let between = Uniform::new(0.0, 100.0).unwrap();
-                (
-                    r.clone(),
-                    (0..((128 + 8) / 2))
-                        .map(|_| bf16::from_f32(between.sample(&mut rng) as f32))
-                        .collect::<Vec<bf16>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        store
-            .add_values("key1", random_values.clone().into_par_iter())
-            .unwrap();
-        store.finish(temp_dir.as_ref().join("store.gdata")).unwrap();
-
-        {
-            let mut store = DataStore::open(
-                temp_dir.as_ref().join("store.gdata"),
-                DataStoreReadOptions::default(),
-            )
-            .unwrap();
-
-            let values_iter = store.par_iter(3, 2, false, None);
-
-            let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
-            let values = ndarray::concatenate(
-                Axis(0),
-                &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
-            )
-            .unwrap();
-
-            let ground_truth = random_values
-                .iter()
-                .map(|(_, x)| {
-                    Array3::from_shape_vec((1, 64, 1), x[2..66].to_vec())
-                        .unwrap()
-                        .mapv(|v| v.to_f32())
-                })
-                .collect::<Vec<_>>();
-            let ground_truth = ndarray::concatenate(
-                Axis(0),
-                &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>(),
-            )
-            .unwrap();
-
-            assert_eq!(values, ground_truth);
-        }
-
-        {
-            let mut store = DataStore::open(
-                temp_dir.as_ref().join("store.gdata"),
-                DataStoreReadOptions {
-                    shift: -2,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-            let values_iter = store.par_iter(3, 2, false, None);
-            let values = values_iter.map(|(_, values)| values).collect::<Vec<_>>();
-            let values = ndarray::concatenate(
-                Axis(0),
-                &values.iter().map(|x| x.view()).collect::<Vec<_>>(),
-            )
-            .unwrap();
-
-            let ground_truth = random_values
-                .iter()
-                .map(|(_, x)| {
-                    Array3::from_shape_vec((1, 64, 1), x[1..65].to_vec())
-                        .unwrap()
-                        .mapv(|v| v.to_f32())
-                })
-                .collect::<Vec<_>>();
-            let ground_truth = ndarray::concatenate(
-                Axis(0),
-                &ground_truth.iter().map(|x| x.view()).collect::<Vec<_>>(),
-            )
-            .unwrap();
-
-            assert_eq!(values, ground_truth);
+            assert!((-4..=4).any(|shift| {
+                let start = (start + shift) as usize;
+                let end = (end + shift) as usize;
+                values.slice(s![i, .., ..]) == array.slice(s![i, start / 2..end / 2, ..])
+                    && s.slice(s![i, ..]).to_vec() == seqs[i][start..end]
+            }));
         }
     }
 }

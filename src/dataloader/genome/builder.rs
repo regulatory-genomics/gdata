@@ -39,6 +39,10 @@ use crate::w5z::W5Z;
         The step size for sliding the window across the genome (default is None, which uses `window_size`).
     resolution
         The resolution of the stored genomic data (default is 1).
+    padding
+        The amount of padding to add around each genomic segment (default is 0).
+        Extra padding allows shifting the window within the padded region during
+        data loading.
     chroms
         A list of chromosomes to include in the dataset. If None, all chromosomes in the FASTA file will be used.
     temp_dir
@@ -81,11 +85,11 @@ impl GenomeDataBuilder {
     #[new]
     #[pyo3(
         signature = (
-            location, genome_fasta, window_size, *, segments=None, step_size=None, resolution=1,
-            chroms=None, temp_dir=None,
+            location, genome_fasta, window_size, *, segments=None, step_size=None, resolution=32,
+            padding=0, chroms=None, temp_dir=None,
         ),
         text_signature = "($self, location, genome_fasta, window_size, *, segments=None,
-            step_size=None, resolution=1, chroms=None, temp_dir=None)"
+            step_size=None, resolution=32, padding=0, chroms=None, temp_dir=None)"
     )]
     pub fn new(
         location: PathBuf,
@@ -94,6 +98,7 @@ impl GenomeDataBuilder {
         segments: Option<Vec<String>>,
         step_size: Option<u32>,
         resolution: u32,
+        padding: u32,
         chroms: Option<Vec<String>>,
         temp_dir: Option<PathBuf>,
     ) -> Result<Self> {
@@ -106,7 +111,7 @@ impl GenomeDataBuilder {
             &tmp_dir,
             window_size,
             resolution,
-            0,
+            padding,
         )?;
         let mut fasta_reader = open_fasta(genome_fasta)?;
 
