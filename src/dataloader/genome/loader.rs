@@ -95,6 +95,7 @@ pub struct GenomeDataLoader {
     subset: Option<Vec<GenomicRange>>,
     #[pyo3(get, set)]
     batch_size: usize,
+    #[pyo3(get, set)]
     shuffle: bool,
     seq_as_string: bool,
     n_jobs: usize,
