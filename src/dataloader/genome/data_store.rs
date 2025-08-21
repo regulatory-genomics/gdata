@@ -431,12 +431,20 @@ impl DataStoreBuilder {
         self.sequence_length + self.padding * 2
     }
 
+    fn chroms(&self) -> Vec<String> {
+        self.segments
+            .keys()
+            .map(|r| r.chrom().to_string())
+            .unique()
+            .collect()
+    }
+
     fn add_seqs(
         &mut self,
         seqs: impl IndexedParallelIterator<Item = (GenomicRange, Vec<u8>)>,
     ) -> Result<()> {
         let seq_len = self.total_sequence_length() as usize;
-        let chunk_size = seqs.len() / 32;
+        let chunk_size = (seqs.len() / 32).max(1);
         let files = seqs
             .chunks(chunk_size)
             .flat_map_iter(|chunk| {
@@ -503,7 +511,7 @@ impl DataStoreBuilder {
             .iter_mut()
             .map(|(k, file)| (k, Arc::new(Mutex::new(file))))
             .collect();
-        let chunk_size = data.len() / 32;
+        let chunk_size = (data.len() / 32).max(1);
         data.chunks(chunk_size).try_for_each(|chunk| {
             chunk.into_iter().try_for_each(|(range, values)| {
                 ensure!(
@@ -537,8 +545,7 @@ impl DataStoreBuilder {
         let key = key.into();
 
         // Load the W5Z data
-        let data = data
-            .keys()?
+        let data = self.chroms()
             .into_par_iter()
             .map(|chr| {
                 let v: Vec<_> = data

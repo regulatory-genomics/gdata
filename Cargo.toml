@@ -12,7 +12,7 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 anyhow = "1.0"
 average = "0.16"
 ndarray = { version = "0.16", features = ["serde"] }
-bigtools = "0.5.6"
+bigtools = "0.5"
 bincode = { version = "2", features = ["serde"] }
 itertools = "0.14"
 indexmap = { version = "2.10", features = ["serde", "rayon"] }

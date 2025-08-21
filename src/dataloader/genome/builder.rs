@@ -57,8 +57,9 @@ use crate::w5z::W5Z;
     >>> from gdata import as GenomeDataBuilder
     >>> regions = ["chr11:35041782-35238390", "chr11:35200000-35300000"]
     >>> tracks = {'DNase:CD14-positive monocyte': 'ENCSR464ETX.w5z', 'DNase:keratinocyte': 'ENCSR000EPQ.w5z'}
-    >>> builder = GenomeDataBuilder("genome", 'genome.fa.gz', segments=regions, window_size=196_608, resolution=128)
+    >>> builder = GenomeDataBuilder("genome.gdata", 'genome.fa.gz', segments=regions, window_size=196_608, resolution=128)
     >>> builder.add_files(tracks)
+    >>> builder.finish()
 */
 #[pyclass]
 pub struct GenomeDataBuilder {
@@ -103,9 +104,9 @@ impl GenomeDataBuilder {
         temp_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let tmp_dir = if let Some(dir) = temp_dir {
-            tempfile::tempdir_in(dir)?
+            tempfile::Builder::new().prefix("gdata_tmp").tempdir_in(dir)?
         } else {
-            tempfile::tempdir()?
+            tempfile::Builder::new().prefix("gdata_tmp").tempdir()?
         };
         let mut store_builder = DataStoreBuilder::new(
             &tmp_dir,
@@ -197,8 +198,9 @@ impl GenomeDataBuilder {
         signature = (files),
         text_signature = "($self, files)",
     )]
-    pub fn add_files(&mut self, files: IndexMap<String, PathBuf>) -> Result<()> {
+    pub fn add_files(&mut self, py: Python<'_>, files: IndexMap<String, PathBuf>) -> Result<()> {
         for (key, path) in files {
+            py.check_signals()?;
             self.add_file(&key, path)?;
         }
         Ok(())
