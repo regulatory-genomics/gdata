@@ -138,6 +138,7 @@ impl GenomeDataBuilder {
                     expand_segment(&mut g, window_size as u64, &chrom_sizes);
                     g
                 })
+                .unique() // Ensure segments are unique
                 .collect();
             chrom_sizes.retain(|chrom, _| all_chroms.contains(chrom));
             s
@@ -147,7 +148,6 @@ impl GenomeDataBuilder {
                 .flat_map(|(_, iter)| iter)
                 .collect()
         };
-        assert!(segments.iter().all_unique(), "segments must be unique");
         store_builder.add_segments(segments, &mut fasta_reader)?;
 
         Ok(Self {
