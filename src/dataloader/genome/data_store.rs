@@ -545,7 +545,8 @@ impl DataStoreBuilder {
         let key = key.into();
 
         // Load the W5Z data
-        let data = self.chroms()
+        let data = self
+            .chroms()
             .into_par_iter()
             .map(|chr| {
                 let v: Vec<_> = data
@@ -584,6 +585,9 @@ impl DataStoreBuilder {
     }
 
     pub fn finish(mut self, path: impl AsRef<Path>) -> Result<()> {
+        path.as_ref()
+            .parent()
+            .map(|p| std::fs::create_dir_all(p).unwrap());
         let mut store = File::create(&path).with_context(|| {
             format!(
                 "Failed to create data store file at {}",
