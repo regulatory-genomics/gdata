@@ -1,0 +1,6 @@
+gdata.utils.Transcript.strand
+=============================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.strand

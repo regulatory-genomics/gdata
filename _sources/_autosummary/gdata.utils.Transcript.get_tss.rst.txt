@@ -1,0 +1,6 @@
+gdata.utils.Transcript.get\_tss
+===============================
+
+.. currentmodule:: gdata.utils
+
+.. automethod:: Transcript.get_tss

@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.add\_file
+=================================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.add_file
