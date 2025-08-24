@@ -3,6 +3,7 @@ use bed_utils::bed::{BEDLike, GenomicRange};
 use bincode::{Decode, Encode};
 use half::bf16;
 use indexmap::{IndexMap, IndexSet};
+use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, Axis};
 use noodles::core::Position;
@@ -391,7 +392,7 @@ pub struct DataStoreBuilder {
     sequence_length: u32,
     resolution: u32,
     padding: u32,
-    pub(crate) segments: IndexMap<GenomicRange, File>,
+    pub(crate) segments: IndexMap<GenomicRange, PathBuf>,
     pub(crate) data_keys: IndexSet<String>,
 }
 
@@ -468,7 +469,7 @@ impl DataStoreBuilder {
                     file.write_all(&seq)
                         .expect("Failed to write sequences to file");
 
-                    (range, file)
+                    (range, file_path)
                 })
             })
             .collect::<Vec<_>>();
@@ -506,11 +507,6 @@ impl DataStoreBuilder {
         self.data_keys.insert(key);
 
         let val_len = (self.total_sequence_length() / self.resolution) as usize;
-        let segments: HashMap<_, _> = self
-            .segments
-            .iter_mut()
-            .map(|(k, file)| (k, Arc::new(Mutex::new(file))))
-            .collect();
         let chunk_size = (data.len() / 32).max(1);
         data.chunks(chunk_size).try_for_each(|chunk| {
             chunk.into_iter().try_for_each(|(range, values)| {
@@ -521,16 +517,18 @@ impl DataStoreBuilder {
                     values.len(),
                     val_len,
                 );
-                let mut file = segments
-                    .get(&range)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "No sequence for range {} exists. Add sequences first!",
-                            range.pretty_show()
-                        )
-                    })?
-                    .lock()
-                    .unwrap();
+                let file_path = self.segments.get(&range).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No sequence for range {} exists. Add sequences first!",
+                        range.pretty_show()
+                    )
+                })?;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(file_path)
+                    .with_context(|| {
+                        format!("Failed to open data file at: {}", file_path.display())
+                    })?;
                 let values = bincode::serde::encode_to_vec(values, bincode::config::standard())?;
                 let values = compress_data_zst(values, 5);
                 file.write_all(&values.len().to_le_bytes())?;
@@ -595,6 +593,14 @@ impl DataStoreBuilder {
             )
         })?;
 
+        let style = ProgressStyle::with_template(
+            "{msg}: [{elapsed}] {wide_bar:.cyan/blue} {percent}/100% (eta: {eta})",
+        )
+        .unwrap();
+        let bar = ProgressBar::new(self.segments.len().div_ceil(32) as u64)
+            .with_message("Compressing")
+            .with_style(style);
+
         let n_keys = self.data_keys.len();
         let sizes: Vec<_> = self
             .segments
@@ -612,6 +618,7 @@ impl DataStoreBuilder {
                 });
                 sizes
             })
+            .progress_with(bar)
             .collect();
 
         let segment_index = self
@@ -645,9 +652,13 @@ impl DataStoreBuilder {
     }
 }
 
-fn compress_data_file(file: &mut File, nrow: usize) -> Result<(Vec<u8>, usize)> {
-    file.seek(std::io::SeekFrom::Start(0))?;
-
+fn compress_data_file(file_path: impl AsRef<Path>, nrow: usize) -> Result<(Vec<u8>, usize)> {
+    let mut file = File::open(&file_path).with_context(|| {
+        format!(
+            "Failed to open data file at: {}",
+            file_path.as_ref().display()
+        )
+    })?;
     let mut n = [0; 8];
     file.read_exact(&mut n)?;
     let n = u64::from_le_bytes(n);

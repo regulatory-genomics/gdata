@@ -6,7 +6,7 @@ use noodles::fasta::{
     fai::Index,
     io::{indexed_reader::Builder, IndexedReader},
 };
-use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
+use indicatif::{ProgressIterator, ProgressStyle};
 use pyo3::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufReader;
@@ -201,13 +201,10 @@ impl GenomeDataBuilder {
     )]
     pub fn add_files(&mut self, py: Python<'_>, files: IndexMap<String, PathBuf>) -> Result<()> {
         let style = ProgressStyle::with_template(
-            "{msg}: [{elapsed}] {wide_bar:.cyan/blue} {human_pos}/{human_len} (eta: {eta})",
+            "Adding files: [{elapsed}] {wide_bar:.cyan/blue} {human_pos}/{human_len} (eta: {eta})",
         )
         .unwrap();
-        let bar = ProgressBar::new(files.len() as u64)
-            .with_message("Adding files")
-            .with_style(style);
-        files.into_iter().progress_with(bar).try_for_each(|(key, path)| {
+        files.into_iter().progress_with_style(style).try_for_each(|(key, path)| {
             py.check_signals()?;
             self.add_file(&key, path)?;
             Ok(())
@@ -247,11 +244,13 @@ impl GenomeDataBuilder {
        None
     */
     pub fn finish(&mut self) -> Result<()> {
-        let (store_builder, _) = self
+        let (store_builder, tmp) = self
             .store_builder
             .take()
             .expect("data store has been moved");
-        store_builder.finish(&self.location)
+        store_builder.finish(&self.location)?;
+        tmp.close()?;
+        Ok(())
     }
 }
 
