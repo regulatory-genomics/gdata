@@ -1,6 +1,6 @@
 [package]
 name = "genomics-dataloader"
-version = "0.5.2-dev"
+version = "0.5.2"
 edition = "2021"
 
 [lib]
