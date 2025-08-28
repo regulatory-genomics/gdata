@@ -18,10 +18,16 @@
 //!
 //! The module aims to provide a comprehensive, efficient, and flexible way to handle and manipulate
 //! genomic feature counts in Rust.
-use pyo3::prelude::*;
 use anyhow::{bail, Context, Result};
-use noodles::{core::Position, gff::{self, feature::record::Strand}};
+use indexmap::IndexMap;
+use itertools::Itertools;
 use noodles::gff::feature::Record;
+use noodles::{
+    core::Position,
+    gff::{self, feature::record::Strand},
+};
+use pyo3::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::{fmt::Debug, io::BufReader, path::PathBuf};
 
 struct ParserOptions {
@@ -54,6 +60,8 @@ pub struct Gene {
     pub is_coding: Option<bool>,
     #[pyo3(get)]
     pub chrom: String,
+    #[pyo3(get)]
+    pub exons: Option<Vec<(usize, usize)>>,
     pub left: Position,
     pub right: Position,
     pub strand: Strand,
@@ -71,8 +79,11 @@ impl Gene {
         let get_attr = |key: &str| -> String {
             attributes
                 .get(key.as_bytes())
-                .expect(&format!("failed to find '{}' in record: {:?}", key, record)).unwrap()
-                .as_string().unwrap().to_string()
+                .expect(&format!("failed to find '{}' in record: {:?}", key, record))
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
         };
         let get_attr_maybe = |key: &str| -> Option<String> {
             attributes
@@ -85,6 +96,7 @@ impl Gene {
             gene_id: get_attr(options.gene_id_key.as_str()),
             is_coding: get_attr_maybe("gene_type").map(|x| x == "protein_coding"),
             chrom: record.reference_sequence_name().to_string(),
+            exons: None,
             left,
             right,
             strand: record.strand()?,
@@ -98,7 +110,7 @@ impl Gene {
     fn get_start(&self) -> usize {
         self.left.get() - 1
     }
-    
+
     #[getter]
     fn get_end(&self) -> usize {
         self.right.get()
@@ -125,7 +137,6 @@ impl Gene {
         }
     }
 }
-
 
 /// Position is 0-based.
 #[pyclass]
@@ -160,8 +171,11 @@ impl Transcript {
         let get_attr = |key: &str| -> String {
             attributes
                 .get(key.as_bytes())
-                .expect(&format!("failed to find '{}' in record: {:?}", key, record)).unwrap()
-                .as_string().unwrap().to_string()
+                .expect(&format!("failed to find '{}' in record: {:?}", key, record))
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
         };
         let get_attr_maybe = |key: &str| -> Option<String> {
             attributes
@@ -189,7 +203,7 @@ impl Transcript {
     fn get_start(&self) -> usize {
         self.left.get() - 1
     }
-    
+
     #[getter]
     fn get_end(&self) -> usize {
         self.right.get()
@@ -217,7 +231,6 @@ impl Transcript {
     }
 }
 
-
 #[pyfunction]
 #[pyo3(
     signature = (gff_file, *,
@@ -234,8 +247,7 @@ pub fn read_transcripts(
     transcript_id_key: &str,
     gene_name_key: &str,
     gene_id_key: &str,
-) -> Result<Vec<Transcript>>
-{
+) -> Result<Vec<Transcript>> {
     let opts = ParserOptions {
         transcript_name_key: transcript_name_key.to_string(),
         transcript_id_key: transcript_id_key.to_string(),
@@ -256,18 +268,12 @@ pub fn read_transcripts(
     Ok(results)
 }
 
-
 #[pyfunction]
 #[pyo3(
     signature = (gff_file, *, gene_name_key="gene_name", gene_id_key="gene_id"),
     text_signature = "(gff_file, *, gene_name_key='gene_name', gene_id_key='gene_id')"
 )]
-pub fn read_genes(
-    gff_file: PathBuf,
-    gene_name_key: &str,
-    gene_id_key: &str,
-) -> Result<Vec<Gene>>
-{
+pub fn read_genes(gff_file: PathBuf, gene_name_key: &str, gene_id_key: &str) -> Result<Vec<Gene>> {
     let opts = ParserOptions {
         gene_name_key: gene_name_key.to_string(),
         gene_id_key: gene_id_key.to_string(),
@@ -277,12 +283,43 @@ pub fn read_genes(
         .with_context(|| format!("failed to open GFF file: {:?}", gff_file))?;
     let reader = flate2::read::MultiGzDecoder::new(reader);
     let mut reader = gff::io::Reader::new(BufReader::new(reader));
-    let mut results = Vec::new();
+
+    let mut results = IndexMap::new();
+    let mut exons = HashMap::new();
     for record in reader.record_bufs() {
         let rec = record.with_context(|| "failed to read GFF record")?;
         if rec.ty() == "gene" {
-            results.push(Gene::from_gff(&rec, &opts)?);
+            let gene = Gene::from_gff(&rec, &opts)?;
+            results.insert(gene.gene_id.clone(), gene);
+        } else if rec.ty() == "exon" {
+            let (gene_id, start, end) = parse_exon(&rec, &opts)?;
+            exons
+                .entry(gene_id)
+                .or_insert_with(HashSet::new)
+                .insert((start, end));
         }
     }
-    Ok(results)
+    Ok(results
+        .into_iter()
+        .map(|(k, mut gene)| {
+            gene.exons = exons.remove(&k).map(|x| x.into_iter().sorted().collect());
+            gene
+        })
+        .collect())
+}
+
+fn parse_exon<R: Record + Debug>(
+    record: &R,
+    options: &ParserOptions,
+) -> Result<(String, usize, usize)> {
+    let left = record.feature_start()?;
+    let right = record.feature_end()?;
+    let gene_id = record
+        .attributes()
+        .get(options.gene_id_key.as_bytes())
+        .unwrap()?
+        .as_string()
+        .unwrap()
+        .to_string();
+    Ok((gene_id, left.get() - 1, right.get()))
 }
