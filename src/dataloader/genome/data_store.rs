@@ -3,7 +3,7 @@ use bed_utils::bed::{BEDLike, GenomicRange};
 use bincode::{Decode, Encode};
 use half::bf16;
 use indexmap::{IndexMap, IndexSet};
-use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, ArrayViewMut3, Axis};
 use noodles::core::Position;
@@ -616,10 +616,11 @@ impl DataStoreBuilder {
                 bytes.into_iter().for_each(|bytes| {
                     store.write_all(&bytes).unwrap();
                 });
+                bar.inc(1);
                 sizes
             })
-            .progress_with(bar)
             .collect();
+        bar.finish();
 
         let segment_index = self
             .segments
