@@ -1,0 +1,707 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>gdata.GenomeDataLoader &#8212; genomics-dataloader 0.5.2 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom.css?v=3c7e44a1" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="../_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="../_static/documentation_options.js?v=8e576371"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = '_autosummary/gdata.GenomeDataLoader';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/regulatory-genomics/genomics-dataloader/refs/heads/main/docs/_static/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = '0.5';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            false;
+        </script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="gdata.GenomeDataLoader.batch_size" href="gdata.GenomeDataLoader.batch_size.html" />
+    <link rel="prev" title="gdata.W5Z.verify" href="gdata.W5Z.verify.html" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="0.5" />
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-ZX9JB19KRP"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-ZX9JB19KRP');
+</script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class=" navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">gdata</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class=" navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/genomics-dataloader" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-3"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-3"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-3"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-3">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+          
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../install.html">
+    Installation
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="../api.html">
+    API reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/regulatory-genomics/genomics-dataloader" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><ul class="current nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.W5Z.html">gdata.W5Z</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.attr.html">gdata.W5Z.attr</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.close.html">gdata.W5Z.close</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.compute_stat.html">gdata.W5Z.compute_stat</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.keys.html">gdata.W5Z.keys</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.list_attrs.html">gdata.W5Z.list_attrs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.update_stat.html">gdata.W5Z.update_stat</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.W5Z.verify.html">gdata.W5Z.verify</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 current active has-children"><a class="current reference internal" href="#">gdata.GenomeDataLoader</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.batch_size.html">gdata.GenomeDataLoader.batch_size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.data.html">gdata.GenomeDataLoader.data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.resolution.html">gdata.GenomeDataLoader.resolution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.segments.html">gdata.GenomeDataLoader.segments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.shuffle.html">gdata.GenomeDataLoader.shuffle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.target_length.html">gdata.GenomeDataLoader.target_length</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.tracks.html">gdata.GenomeDataLoader.tracks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.window_size.html">gdata.GenomeDataLoader.window_size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.copy.html">gdata.GenomeDataLoader.copy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.difference.html">gdata.GenomeDataLoader.difference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.hist.html">gdata.GenomeDataLoader.hist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.intersection.html">gdata.GenomeDataLoader.intersection</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoader.plot.html">gdata.GenomeDataLoader.plot</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.GenomeDataLoaderMap.html">gdata.GenomeDataLoaderMap</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.batch_size.html">gdata.GenomeDataLoaderMap.batch_size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.n_tracks.html">gdata.GenomeDataLoaderMap.n_tracks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.segments.html">gdata.GenomeDataLoaderMap.segments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.difference.html">gdata.GenomeDataLoaderMap.difference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.intersection.html">gdata.GenomeDataLoaderMap.intersection</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataLoaderMap.keys.html">gdata.GenomeDataLoaderMap.keys</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.CatGenomeDataLoader.html">gdata.CatGenomeDataLoader</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.CatGenomeDataLoader.n_tracks.html">gdata.CatGenomeDataLoader.n_tracks</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.GenomeDataBuilder.html">gdata.GenomeDataBuilder</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataBuilder.add_file.html">gdata.GenomeDataBuilder.add_file</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataBuilder.add_files.html">gdata.GenomeDataBuilder.add_files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataBuilder.finish.html">gdata.GenomeDataBuilder.finish</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataBuilder.segments.html">gdata.GenomeDataBuilder.segments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.GenomeDataBuilder.tracks.html">gdata.GenomeDataBuilder.tracks</a></li>
+</ul>
+</details></li>
+</ul>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.utils.Gene.html">gdata.utils.Gene</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.chrom.html">gdata.utils.Gene.chrom</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.end.html">gdata.utils.Gene.end</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.exons.html">gdata.utils.Gene.exons</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.gene_id.html">gdata.utils.Gene.gene_id</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.gene_name.html">gdata.utils.Gene.gene_name</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.is_coding.html">gdata.utils.Gene.is_coding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.start.html">gdata.utils.Gene.start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.strand.html">gdata.utils.Gene.strand</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Gene.get_tss.html">gdata.utils.Gene.get_tss</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="gdata.utils.Transcript.html">gdata.utils.Transcript</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.chrom.html">gdata.utils.Transcript.chrom</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.end.html">gdata.utils.Transcript.end</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.gene_id.html">gdata.utils.Transcript.gene_id</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.gene_name.html">gdata.utils.Transcript.gene_name</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.is_coding.html">gdata.utils.Transcript.is_coding</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.start.html">gdata.utils.Transcript.start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.strand.html">gdata.utils.Transcript.strand</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.transcript_id.html">gdata.utils.Transcript.transcript_id</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.transcript_name.html">gdata.utils.Transcript.transcript_name</a></li>
+<li class="toctree-l2"><a class="reference internal" href="gdata.utils.Transcript.get_tss.html">gdata.utils.Transcript.get_tss</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="gdata.utils.read_genes.html">gdata.utils.read_genes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="gdata.utils.read_transcripts.html">gdata.utils.read_transcripts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="gdata.utils.bw_to_w5z.html">gdata.utils.bw_to_w5z</a></li>
+<li class="toctree-l1"><a class="reference internal" href="gdata.utils.bam_cov.html">gdata.utils.bam_cov</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="../api.html" class="nav-link">API reference</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">gdata.GenomeDataLoader</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="gdata-genomedataloader">
+<h1>gdata.GenomeDataLoader<a class="headerlink" href="#gdata-genomedataloader" title="Link to this heading">#</a></h1>
+<dl class="py class">
+<dt class="sig sig-object py" id="gdata.GenomeDataLoader">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">gdata.</span></span><span class="sig-name descname"><span class="pre">GenomeDataLoader</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">/</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">location</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">resolution</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">clamp_max</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">window_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shuffle</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">random_shift</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seq_as_string</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_jobs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">random_seed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2025</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#gdata.GenomeDataLoader" title="Link to this definition">#</a></dt>
+<dd><p>A dataloader for genomic data, allowing for efficient retrieval of genomic
+sequences and their associated values.</p>
+<p>This object provides an iterator over genomic data chunks, enabling batch
+retrieval of genomic sequences and their associated values.
+The iterator yields tuples of (sequences, values).
+Sequences has shape (batch_size, sequence_length), and values has shape
+(batch_size, sequence_length / resolution, num_tracks).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>location</strong> (<em>Path</em>) – The path to the genomic data directory.</p></li>
+<li><p><strong>batch_size</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a>) – The number of genomic sequences to retrieve in each batch (default is 8).</p></li>
+<li><p><strong>resolution</strong> (<em>Optional</em><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a><em>]</em>) – The resolution of the genomic data. If not provided, it defaults to the dataset’s resolution.
+If the resolution is provided, it must be a multiple of the dataset’s resolution.
+The values will be aggregated (by taking the average) to this resolution.</p></li>
+<li><p><strong>trim_target</strong> (<em>Optional</em><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a><em>]</em>) – Trim both ends of the target vector according to the <code class="code docutils literal notranslate"><span class="pre">trim_target</span></code> parameter.
+As a result, the length of the values will be reduced by <code class="code docutils literal notranslate"><span class="pre">2</span> <span class="pre">*</span> <span class="pre">trim_target</span></code>.
+The unit of <code class="code docutils literal notranslate"><span class="pre">trim_target</span></code> is base pairs, and it must be a multiple of the resolution.
+Note this only affects the values, not the sequences. The sequences will always
+have the full length as defined in the dataset.
+This is useful when you want to compute the loss on only the central part of the sequence.
+This is because the edges of the sequence may contain
+padding or other artifacts that should not be considered in the loss computation.</p></li>
+<li><p><strong>scale</strong> (<em>Optional</em><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><em>float</em></a><em>]</em>) – Scale the values by this factor. If not provided, no scaling is applied.</p></li>
+<li><p><strong>clamp_max</strong> (<em>Optional</em><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><em>float</em></a><em>]</em>) – Clamp the values to this maximum value. If not provided, no clamping is applied.
+If <code class="code docutils literal notranslate"><span class="pre">scale</span></code> is also provided, the clamping will be applied after scaling.</p></li>
+<li><p><strong>window_size</strong> (<em>Optional</em><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a><em>]</em>) – The window size for retrieving genomic sequences. The loader’s window size
+can be different from the underlying dataset’s window size so that the same
+dataset can be used with different window sizes. However, there are two
+restrictions: (1) The dataset’s window size must be a multiple of the loader’s window size;
+(2) The loader’s window size must be a multiple of the dataset’s resolution.</p></li>
+<li><p><strong>shuffle</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.13)"><em>bool</em></a>) – If True, the data will be shuffled before being returned. Default is False.</p></li>
+<li><p><strong>random_shift</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a>) – The maximum random shift (in base pairs) to apply to the start position of each sequence.
+The actual shift will be randomly chosen from the range [-random_shift, random_shift].
+This is useful for data augmentation, as it introduces variability in the sequences
+retrieved from the dataset.</p></li>
+<li><p><strong>seq_as_string</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.13)"><em>bool</em></a>) – If True, sequences will be returned as strings instead of numpy integer arrays.
+This is useful for cases where you want to work with the sequences as text,
+such as for visualization or text-based analysis.</p></li>
+<li><p><strong>n_jobs</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a>) – The number of parallel jobs to use for loading data.
+This allows for asynchronous loading of data, improving performance during training or inference.
+But it will increase memory usage, the memory usage will be approximately
+<code class="code docutils literal notranslate"><span class="pre">2</span> <span class="pre">*</span> <span class="pre">n_jobs</span> <span class="pre">*</span> <span class="pre">memory_of_chunk</span></code>.</p></li>
+<li><p><strong>random_seed</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><em>int</em></a>) – The random seed for shuffling the data. Default is 2025.</p></li>
+</ul>
+</dd>
+</dl>
+<div class="admonition seealso">
+<p class="admonition-title">See also</p>
+<p><a class="reference internal" href="gdata.GenomeDataBuilder.html#gdata.GenomeDataBuilder" title="gdata.GenomeDataBuilder"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GenomeDataBuilder</span></code></a>, <a class="reference internal" href="gdata.GenomeDataLoaderMap.html#gdata.GenomeDataLoaderMap" title="gdata.GenomeDataLoaderMap"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GenomeDataLoaderMap</span></code></a></p>
+</div>
+<p class="rubric">Examples</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">gdata</span><span class="w"> </span><span class="kn">import</span> <span class="k">as</span> <span class="n">GenomeDataLoader</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">loader</span> <span class="o">=</span> <span class="n">GenomeDataLoader</span><span class="p">(</span><span class="s2">&quot;test_genome&quot;</span><span class="p">,</span> <span class="n">trim_target</span><span class="o">=</span><span class="mi">40_960</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">region</span> <span class="o">=</span> <span class="s1">&#39;chr11:35041782-35238390&#39;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">tracks</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;DNase:CD14-positive monocyte&#39;</span><span class="p">,</span> <span class="s1">&#39;DNase:keratinocyte&#39;</span><span class="p">,</span> <span class="s1">&#39;ChIP-H3K27ac:keratinocyte&#39;</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">loader</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">tracks</span><span class="p">,</span> <span class="n">savefig</span><span class="o">=</span><span class="s2">&quot;signal.png&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<img alt="../_images/genome_signal.png" class="align-center" src="../_images/genome_signal.png" />
+<p class="rubric">Attributes</p>
+<div class="pst-scrollable-table-container"><table class="autosummary longtable table autosummary">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.batch_size.html#gdata.GenomeDataLoader.batch_size" title="gdata.GenomeDataLoader.batch_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">batch_size</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.data.html#gdata.GenomeDataLoader.data" title="gdata.GenomeDataLoader.data"><code class="xref py py-obj docutils literal notranslate"><span class="pre">data</span></code></a></p></td>
+<td><p>Returns the data indexer for accessing genomic data.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.resolution.html#gdata.GenomeDataLoader.resolution" title="gdata.GenomeDataLoader.resolution"><code class="xref py py-obj docutils literal notranslate"><span class="pre">resolution</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.segments.html#gdata.GenomeDataLoader.segments" title="gdata.GenomeDataLoader.segments"><code class="xref py py-obj docutils literal notranslate"><span class="pre">segments</span></code></a></p></td>
+<td><p>Returns the segments of the genome as a vector of strings.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.shuffle.html#gdata.GenomeDataLoader.shuffle" title="gdata.GenomeDataLoader.shuffle"><code class="xref py py-obj docutils literal notranslate"><span class="pre">shuffle</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.target_length.html#gdata.GenomeDataLoader.target_length" title="gdata.GenomeDataLoader.target_length"><code class="xref py py-obj docutils literal notranslate"><span class="pre">target_length</span></code></a></p></td>
+<td><p>The length of the target vector in base pairs.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.tracks.html#gdata.GenomeDataLoader.tracks" title="gdata.GenomeDataLoader.tracks"><code class="xref py py-obj docutils literal notranslate"><span class="pre">tracks</span></code></a></p></td>
+<td><p>Returns the track names in the dataset.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.window_size.html#gdata.GenomeDataLoader.window_size" title="gdata.GenomeDataLoader.window_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">window_size</span></code></a></p></td>
+<td><p>The length of input sequences in base pairs.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Methods</p>
+<div class="pst-scrollable-table-container"><table class="autosummary longtable table autosummary">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.copy.html#gdata.GenomeDataLoader.copy" title="gdata.GenomeDataLoader.copy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">copy</span></code></a>()</p></td>
+<td><p>Create a copy of the GenomeDataLoader.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.difference.html#gdata.GenomeDataLoader.difference" title="gdata.GenomeDataLoader.difference"><code class="xref py py-obj docutils literal notranslate"><span class="pre">difference</span></code></a>(regions)</p></td>
+<td><p>Creating a new genomic data loader in which the regions differ from the specified ones.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.hist.html#gdata.GenomeDataLoader.hist" title="gdata.GenomeDataLoader.hist"><code class="xref py py-obj docutils literal notranslate"><span class="pre">hist</span></code></a>(*[, bins, limit, min, log, savefig])</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.intersection.html#gdata.GenomeDataLoader.intersection" title="gdata.GenomeDataLoader.intersection"><code class="xref py py-obj docutils literal notranslate"><span class="pre">intersection</span></code></a>(regions)</p></td>
+<td><p>Creating a new genomic data loader in which the regions intersect with the specified ones.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="gdata.GenomeDataLoader.plot.html#gdata.GenomeDataLoader.plot" title="gdata.GenomeDataLoader.plot"><code class="xref py py-obj docutils literal notranslate"><span class="pre">plot</span></code></a>(region, tracks, *[, savefig])</p></td>
+<td><p>Plots the genomic signal for a specified region and tracks.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</dd></dl>
+
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="gdata.W5Z.verify.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">gdata.W5Z.verify</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="gdata.GenomeDataLoader.batch_size.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">gdata.GenomeDataLoader.batch_size</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gdata.GenomeDataLoader"><code class="docutils literal notranslate"><span class="pre">GenomeDataLoader</span></code></a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025, Regulatory Genomics Lab, Westlake University.
+      <br/>
+    
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

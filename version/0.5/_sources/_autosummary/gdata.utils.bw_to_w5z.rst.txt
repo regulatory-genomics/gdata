@@ -1,0 +1,6 @@
+﻿gdata.utils.bw\_to\_w5z
+=======================
+
+.. currentmodule:: gdata.utils
+
+.. autofunction:: bw_to_w5z

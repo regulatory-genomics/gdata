@@ -1,0 +1,6 @@
+﻿gdata.utils.bam\_cov
+====================
+
+.. currentmodule:: gdata.utils
+
+.. autofunction:: bam_cov

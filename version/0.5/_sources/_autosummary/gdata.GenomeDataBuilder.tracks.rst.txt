@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.tracks
+==============================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.tracks

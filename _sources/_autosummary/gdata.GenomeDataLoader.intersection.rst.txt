@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.intersection
+===================================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoader.intersection

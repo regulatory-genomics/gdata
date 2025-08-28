@@ -1,0 +1,6 @@
+gdata.utils.Gene.is\_coding
+===========================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.is_coding

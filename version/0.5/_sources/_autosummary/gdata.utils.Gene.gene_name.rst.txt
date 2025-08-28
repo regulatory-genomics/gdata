@@ -1,0 +1,6 @@
+gdata.utils.Gene.gene\_name
+===========================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.gene_name
