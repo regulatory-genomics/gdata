@@ -1,0 +1,6 @@
+gdata.utils.Transcript.chrom
+============================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.chrom

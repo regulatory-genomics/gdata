@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.seq
+==========================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.seq

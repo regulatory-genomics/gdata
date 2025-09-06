@@ -1,0 +1,6 @@
+gdata.utils.Gene.strand
+=======================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.strand

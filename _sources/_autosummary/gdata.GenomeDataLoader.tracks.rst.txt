@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.tracks
+=============================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.tracks

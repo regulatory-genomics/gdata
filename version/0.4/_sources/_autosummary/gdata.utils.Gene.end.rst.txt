@@ -1,0 +1,6 @@
+gdata.utils.Gene.end
+====================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.end

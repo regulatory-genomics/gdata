@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.chroms
+==============================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.chroms

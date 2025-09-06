@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.window\_size
+===================================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.window_size

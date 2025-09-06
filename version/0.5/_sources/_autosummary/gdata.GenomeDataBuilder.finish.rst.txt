@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.finish
+==============================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.finish

@@ -1,0 +1,20 @@
+﻿gdata.GenomeDataLoader
+======================
+
+.. currentmodule:: gdata
+
+.. autoclass:: GenomeDataLoader
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+   
+   

@@ -1,0 +1,32 @@
+﻿gdata.GenomeDataLoaderMap
+=========================
+
+.. currentmodule:: gdata
+
+.. autoclass:: GenomeDataLoaderMap
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~GenomeDataLoaderMap.batch_size
+      ~GenomeDataLoaderMap.n_tracks
+      ~GenomeDataLoaderMap.segments
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~GenomeDataLoaderMap.difference
+      ~GenomeDataLoaderMap.intersection
+      ~GenomeDataLoaderMap.keys
+   
+   

@@ -1,0 +1,6 @@
+﻿gdata.utils.read\_transcripts
+=============================
+
+.. currentmodule:: gdata.utils
+
+.. autofunction:: read_transcripts

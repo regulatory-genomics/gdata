@@ -1,0 +1,6 @@
+gdata.utils.Gene.exons
+======================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.exons

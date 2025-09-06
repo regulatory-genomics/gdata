@@ -1,0 +1,6 @@
+gdata.utils.Transcript.is\_coding
+=================================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.is_coding

@@ -1,0 +1,36 @@
+﻿gdata.utils.Transcript
+======================
+
+.. currentmodule:: gdata.utils
+
+.. autoclass:: Transcript
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Transcript.chrom
+      ~Transcript.end
+      ~Transcript.gene_id
+      ~Transcript.gene_name
+      ~Transcript.is_coding
+      ~Transcript.start
+      ~Transcript.strand
+      ~Transcript.transcript_id
+      ~Transcript.transcript_name
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Transcript.get_tss
+   
+   

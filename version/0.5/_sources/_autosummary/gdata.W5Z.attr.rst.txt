@@ -1,0 +1,6 @@
+gdata.W5Z.attr
+==============
+
+.. currentmodule:: gdata
+
+.. automethod:: W5Z.attr

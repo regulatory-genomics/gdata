@@ -1,0 +1,6 @@
+gdata.utils.Gene.start
+======================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Gene.start

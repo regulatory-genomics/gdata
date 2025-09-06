@@ -1,0 +1,27 @@
+﻿gdata.W5Z
+=========
+
+.. currentmodule:: gdata
+
+.. autoclass:: W5Z
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~W5Z.attr
+      ~W5Z.close
+      ~W5Z.compute_stat
+      ~W5Z.keys
+      ~W5Z.list_attrs
+      ~W5Z.update_stat
+      ~W5Z.verify
+   
+   

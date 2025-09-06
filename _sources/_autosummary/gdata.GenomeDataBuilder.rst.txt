@@ -1,0 +1,25 @@
+﻿gdata.GenomeDataBuilder
+=======================
+
+.. currentmodule:: gdata
+
+.. autoclass:: GenomeDataBuilder
+
+   
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~GenomeDataBuilder.add_file
+      ~GenomeDataBuilder.add_files
+      ~GenomeDataBuilder.finish
+      ~GenomeDataBuilder.segments
+      ~GenomeDataBuilder.tracks
+   
+   

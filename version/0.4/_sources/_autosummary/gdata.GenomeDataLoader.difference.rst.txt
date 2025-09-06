@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.difference
+=================================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoader.difference

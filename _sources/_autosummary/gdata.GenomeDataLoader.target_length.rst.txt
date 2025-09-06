@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.target\_length
+=====================================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.target_length

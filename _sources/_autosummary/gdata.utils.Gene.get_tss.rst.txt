@@ -1,0 +1,6 @@
+gdata.utils.Gene.get\_tss
+=========================
+
+.. currentmodule:: gdata.utils
+
+.. automethod:: Gene.get_tss

@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.plot
+===========================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoader.plot

@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.shuffle
+==============================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoader.shuffle

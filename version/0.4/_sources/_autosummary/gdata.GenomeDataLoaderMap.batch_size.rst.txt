@@ -1,0 +1,6 @@
+gdata.GenomeDataLoaderMap.batch\_size
+=====================================
+
+.. currentmodule:: gdata
+
+.. autoattribute:: GenomeDataLoaderMap.batch_size

@@ -1,0 +1,6 @@
+gdata.utils.Transcript.transcript\_name
+=======================================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.transcript_name

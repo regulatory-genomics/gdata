@@ -1,0 +1,6 @@
+gdata.GenomeDataLoader.hist
+===========================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoader.hist

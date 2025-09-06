@@ -1,0 +1,35 @@
+﻿gdata.utils.Gene
+================
+
+.. currentmodule:: gdata.utils
+
+.. autoclass:: Gene
+
+   
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Gene.chrom
+      ~Gene.end
+      ~Gene.exons
+      ~Gene.gene_id
+      ~Gene.gene_name
+      ~Gene.is_coding
+      ~Gene.start
+      ~Gene.strand
+   
+   
+
+   
+   
+   .. rubric:: Methods
+
+   .. autosummary::
+      :toctree: .
+   
+      ~Gene.get_tss
+   
+   

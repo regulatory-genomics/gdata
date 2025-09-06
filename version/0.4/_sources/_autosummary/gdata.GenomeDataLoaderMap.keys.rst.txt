@@ -1,0 +1,6 @@
+gdata.GenomeDataLoaderMap.keys
+==============================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataLoaderMap.keys

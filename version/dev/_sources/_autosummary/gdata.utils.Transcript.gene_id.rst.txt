@@ -1,0 +1,6 @@
+gdata.utils.Transcript.gene\_id
+===============================
+
+.. currentmodule:: gdata.utils
+
+.. autoattribute:: Transcript.gene_id

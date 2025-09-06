@@ -1,0 +1,6 @@
+gdata.utils.W5Z.update\_stat
+============================
+
+.. currentmodule:: gdata.utils
+
+.. automethod:: W5Z.update_stat

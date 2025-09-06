@@ -1,0 +1,6 @@
+gdata.GenomeDataBuilder.compress
+================================
+
+.. currentmodule:: gdata
+
+.. automethod:: GenomeDataBuilder.compress
